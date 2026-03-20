@@ -1,5 +1,5 @@
 """
-Full-field inference: tile a periodic 3D field with a trained UNet patch-by-patch
+Full-field inference: tile a periodic 3D field with a trained model patch-by-patch
 and average the overlapping predictions.
 
 The striding and periodic-boundary treatment match gen_patches.extract_patches
@@ -12,8 +12,8 @@ import torch
 from tqdm import tqdm
 
 
-def apply_unet_to_field(field, model, patch_size, pad, overlap, device=None):
-    """Apply a trained UNet to every patch of a periodic 3D field.
+def apply_model_to_field(field, model, patch_size, pad, overlap, device=None):
+    """Apply a trained model to every patch of a periodic 3D field.
 
     Patches are extracted with periodic boundary wrapping; overlapping
     regions are averaged in the output.
@@ -53,7 +53,7 @@ def apply_unet_to_field(field, model, patch_size, pad, overlap, device=None):
 
     z_indices = range(0, N, step)
     with torch.no_grad():
-        for z in tqdm(z_indices, desc='apply_unet (z-slices)'):
+        for z in tqdm(z_indices, desc='apply_model (z-slices)'):
             for y in range(0, N, step):
                 for x in range(0, N, step):
                     # Periodic-boundary patch extraction (same as extract_patches)
@@ -76,5 +76,5 @@ def apply_unet_to_field(field, model, patch_size, pad, overlap, device=None):
 
     output = np.where(weight > 0, output / weight, 0.0).astype(field.dtype)
     elapsed = time.time() - t0
-    print(f'apply_unet done: step={step}, elapsed={elapsed:.1f}s')
+    print(f'apply_model done: step={step}, elapsed={elapsed:.1f}s')
     return output

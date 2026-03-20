@@ -28,7 +28,7 @@ import pipeline as _pipeline_module
 from pipeline import (load_snapshot_pair, compute_target_psi_div,
                       psi_div_to_delta, free_gpu_memory, compute_best_fit,
                       highpass_field)
-from inference import apply_unet_to_field
+from inference import apply_model_to_field
 
 # ── User settings ─────────────────────────────────────────────────
 N_p        = cfg.N_p
@@ -249,7 +249,7 @@ print(f'Loaded: {checkpoint_path}  (pools={num_pools}, device={device})')
 
 k_cut = 0.06   # h/Mpc — matches the tophat0.4 best-fit filter
 
-residual_pred   = apply_unet_to_field(init_delta, loaded_model,
+residual_pred   = apply_model_to_field(init_delta, loaded_model,
                                       infer_patch_size, infer_padding, infer_overlap, device)
 residual_pred   = highpass_field(residual_pred, k_cut, boxsize)
 final_psi_div   = best_fit_psi_div + residual_pred
@@ -333,7 +333,7 @@ best_fit_psi_div_test, best_fit_delta_test, target_delta_test = compute_best_fit
     overwrite=False,
 )
 
-residual_pred_test  = apply_unet_to_field(
+residual_pred_test  = apply_model_to_field(
     init_delta_test, loaded_model, infer_patch_size, infer_padding, infer_overlap, device)
 residual_pred_test  = highpass_field(residual_pred_test, k_cut, boxsize)
 delta_final_test    = psi_div_to_delta(

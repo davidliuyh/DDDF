@@ -166,7 +166,7 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
 
     Checkpoint (.ckpt) stores G + D + both optimizers + both schedulers.
     Final .pth stores only the generator state dict → compatible with
-    the existing apply_unet_to_field inference path.
+    the existing apply_model_to_field inference path.
     """
     final_path = f'{save_file_name}-e{epochs}.pth'
     if not overwrite and os.path.exists(final_path):
