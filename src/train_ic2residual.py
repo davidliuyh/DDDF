@@ -32,7 +32,8 @@ from inference import apply_unet_to_field
 
 # ── User settings ─────────────────────────────────────────────────
 N_p        = cfg.N_p
-filter_dir = cfg.filter_dir
+data_dir   = cfg.data_dir
+model_dir  = cfg.model_dir
 # ──────────────────────────────────────────────────────────────────
 
 # ── Derived constants ──────────────────────────────────────────────
@@ -46,11 +47,11 @@ dl        = dddf.DDDF(cfg.init_redshift(N_p), cfg.final_snapshot_z, cfg.Omega_m,
 veck_main = dl.Veck(dl, N_p, boxsize, padding=0)
 
 print(f'hostname: {os.popen("hostname").read().strip()}')
-print(f'N_p={N_p}, boxsize={boxsize}, filter={filter_dir}')
+print(f'N_p={N_p}, boxsize={boxsize}, data_dir={data_dir}, model_dir={model_dir}')
 
 # ── Section settings ──────────────────────────────────────────────
 realization = 0
-coef_file   = cfg.best_fit_avg_coef_path(filter_dir, cfg.L, N_p)  # None → refit from scratch
+coef_file   = cfg.best_fit_avg_coef_path(data_dir, cfg.L, N_p)  # None -> refit from scratch
 overwrite   = False
 # ──────────────────────────────────────────────────────────────────
 
@@ -73,7 +74,7 @@ best_fit_psi_div, best_fit_delta, target_delta = compute_best_fit(
     dl, init_delta, target_psi_div,
     snapshot_info[0]['pos'], snapshot_info[1]['delta'],
     veck_main, N_p, boxsize, MAS,
-    realization, filter_dir, L,
+    realization, data_dir, L,
     coef_file=coef_file,
     overwrite=overwrite,
 )
@@ -85,10 +86,10 @@ rotate     = cfg.rotate
 
 # ── Section settings ──────────────────────────────────────────────
 train_realizations = cfg.train_realizations   # e.g. list(range(16)); edit in config.py
-coef_file   = cfg.best_fit_avg_coef_path(filter_dir, cfg.L, N_p)  # None → refit from scratch
+coef_file   = cfg.best_fit_avg_coef_path(data_dir, cfg.L, N_p)  # None -> refit from scratch
 # ──────────────────────────────────────────────────────────────────
 
-train_path = cfg.training_data_path(train_realizations, patch_size, padding, overlap, rotate, N_p, filter_dir)
+train_path = cfg.training_data_path(train_realizations, patch_size, padding, overlap, rotate, N_p, data_dir=data_dir)
 
 if os.path.exists(train_path):
     cached = np.load(train_path)
@@ -101,7 +102,7 @@ else:
     all_target_patches = []
 
     for r in train_realizations:
-        train_path_r = cfg.training_data_path(r, patch_size, padding, overlap, rotate, N_p, filter_dir)
+        train_path_r = cfg.training_data_path(r, patch_size, padding, overlap, rotate, N_p, data_dir=data_dir)
         if os.path.exists(train_path_r):
             cached = np.load(train_path_r)
             inp_r = cached['input_patches']
@@ -119,7 +120,7 @@ else:
                 dl, snap_info_r[0]['delta'], tgt_psi_div_r,
                 snap_info_r[0]['pos'], snap_info_r[1]['delta'],
                 veck_main, N_p, boxsize, MAS,
-                r, filter_dir, L,
+                r, data_dir, L,
                 coef_file=coef_file,
                 overwrite=False,
             )
@@ -169,7 +170,7 @@ train_mode = cfg.train_mode  # 'unet' | 'gan'  <- switch in config.py
 
 
 if train_mode == 'gan':
-    model_name = cfg.gan_model_name(train_realizations, patch_size, padding, rotate, N_p, filter_dir)
+    model_name = cfg.gan_model_name(train_realizations, patch_size, padding, rotate, N_p, model_dir=model_dir)
     train_module.train_gan(
         training_data_path=train_path,
         save_file_name=model_name,
@@ -188,7 +189,7 @@ if train_mode == 'gan':
         overwrite=overwrite_train,
     )
 else:
-    model_name = cfg.unet_model_name(train_realizations, patch_size, padding, rotate, N_p, filter_dir)
+    model_name = cfg.unet_model_name(train_realizations, patch_size, padding, rotate, N_p, model_dir=model_dir)
     train_module.train_unet(
         training_data_path=train_path,
         save_file_name=model_name,
@@ -222,11 +223,11 @@ if infer_checkpoint is None:
     if cfg.train_mode == 'gan':
         _auto_model = cfg.gan_model_name(infer_train_realizations,
                                          cfg.patch_size, cfg.padding,
-                                         cfg.rotate, N_p, filter_dir)
+                                         cfg.rotate, N_p, model_dir=model_dir)
     else:
         _auto_model = cfg.unet_model_name(infer_train_realizations,
                                           cfg.patch_size, cfg.padding,
-                                          cfg.rotate, N_p, filter_dir)
+                                          cfg.rotate, N_p, model_dir=model_dir)
     checkpoint_path = f'{_auto_model}-e{infer_epochs}.pth'
 else:
     checkpoint_path = infer_checkpoint
@@ -327,7 +328,7 @@ best_fit_psi_div_test, best_fit_delta_test, target_delta_test = compute_best_fit
     dl, init_delta_test, target_psi_div_test,
     snapshot_info_test[0]['pos'], snapshot_info_test[1]['delta'],
     veck_main, N_p, boxsize, MAS,
-    realization_test, filter_dir, L,
+    realization_test, data_dir, L,
     coef_file=coef_file,
     overwrite=False,
 )
@@ -403,24 +404,24 @@ import matplotlib.pyplot as plt
 # ── User settings ─────────────────────────────────────────────────
 analysis_mode = cfg.train_mode            # 'gan' or 'unet'
 analysis_realizations = cfg.train_realizations
-analysis_filter_dir = filter_dir
+analysis_model_dir = model_dir
 # Optionally specify multiple model prefixes (without -eXX.ckpt) to compare runs.
 analysis_prefixes = []
 # Example:
 # analysis_prefixes = [
-#     cfg.gan_model_name(list(range(8)), cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_filter_dir),
-#     cfg.gan_model_name(list(range(16)), cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_filter_dir),
+#     cfg.gan_model_name(list(range(8)), cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_model_dir),
+#     cfg.gan_model_name(list(range(16)), cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_model_dir),
 # ]
 # ──────────────────────────────────────────────────────────────────
 
 if not analysis_prefixes:
     if analysis_mode == 'gan':
         analysis_prefixes = [cfg.gan_model_name(
-            analysis_realizations, cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_filter_dir
+            analysis_realizations, cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_model_dir
         )]
     else:
         analysis_prefixes = [cfg.unet_model_name(
-            analysis_realizations, cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_filter_dir
+            analysis_realizations, cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_model_dir
         )]
 
 def _epoch_from_path(p):
