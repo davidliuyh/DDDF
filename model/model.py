@@ -1,6 +1,56 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class _CPUSpectralNormConv3d(nn.Module):
+    """Conv3d with spectral norm estimated by CPU power iteration.
+
+    This avoids CUDA cublas GEMV issues seen with torch spectral_norm on
+    some CUDA/PyTorch combinations while keeping spectral normalisation active.
+    """
+
+    def __init__(self, conv: nn.Conv3d, n_power_iterations: int = 1, eps: float = 1e-12):
+        super().__init__()
+        self.conv = conv
+        self.n_power_iterations = max(1, int(n_power_iterations))
+        self.eps = float(eps)
+        self.register_buffer('_sn_u', torch.empty(0, dtype=torch.float32), persistent=False)
+
+    def _reshape_weight_to_matrix(self, w: torch.Tensor) -> torch.Tensor:
+        # Conv3d weight shape: [out_channels, in_channels, kD, kH, kW]
+        return w.reshape(w.shape[0], -1)
+
+    def _compute_sigma(self, w: torch.Tensor) -> torch.Tensor:
+        w_cpu = self._reshape_weight_to_matrix(w).detach().float().cpu()
+        out_features = w_cpu.shape[0]
+        if self._sn_u.numel() != out_features:
+            u0 = torch.randn(out_features, dtype=torch.float32)
+            self._sn_u = F.normalize(u0, dim=0, eps=self.eps)
+
+        u = self._sn_u
+        for _ in range(self.n_power_iterations):
+            v = F.normalize(torch.mv(w_cpu.t(), u), dim=0, eps=self.eps)
+            u = F.normalize(torch.mv(w_cpu, v), dim=0, eps=self.eps)
+
+        self._sn_u = u.detach()
+        sigma = torch.dot(u, torch.mv(w_cpu, v)).clamp_min(self.eps)
+        return sigma
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        sigma = self._compute_sigma(self.conv.weight)
+        sigma = sigma.to(device=self.conv.weight.device, dtype=self.conv.weight.dtype)
+        w_bar = self.conv.weight / sigma
+        return F.conv3d(
+            x,
+            w_bar,
+            self.conv.bias,
+            stride=self.conv.stride,
+            padding=self.conv.padding,
+            dilation=self.conv.dilation,
+            groups=self.conv.groups,
+        )
+
 # ──────────────────────────────────────────────────────────────────────────────
 # UNet3D (generator / standalone regressor)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -174,9 +224,23 @@ class PatchDiscriminator3D(nn.Module):
     """
 
     def __init__(self, in_channels: int = 2, base_channels: int = 32,
-                 n_layers: int = 3, use_spectral_norm: bool = True):
+                 n_layers: int = 3, use_spectral_norm: bool = True,
+                 spectral_norm_impl: str = 'native'):
         super().__init__()
-        sn = nn.utils.parametrizations.spectral_norm if use_spectral_norm else (lambda m: m)
+
+        if spectral_norm_impl not in ('native', 'cpu_power_iter'):
+            raise ValueError(
+                f"spectral_norm_impl must be 'native' or 'cpu_power_iter', got {spectral_norm_impl}"
+            )
+
+        def sn(module: nn.Module) -> nn.Module:
+            if not use_spectral_norm:
+                return module
+            if spectral_norm_impl == 'cpu_power_iter':
+                if not isinstance(module, nn.Conv3d):
+                    raise TypeError('cpu_power_iter spectral norm only supports Conv3d modules')
+                return _CPUSpectralNormConv3d(module)
+            return nn.utils.parametrizations.spectral_norm(module)
 
         # Store intermediate-feature blocks as a ModuleList so that
         # forward() can optionally return their activations for feature

@@ -27,7 +27,7 @@ from inference import apply_model_to_field
 
 
 def _infer_num_pools(state_dict):
-    """Infer UNet depth from checkpoint key names."""
+    """Infer generator depth from checkpoint key names."""
     num_pools = len({int(k.split(".")[1]) for k in state_dict if k.startswith("downs.")})
     return max(num_pools, 1)
 
@@ -38,13 +38,13 @@ def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=
     Resolution order:
     1) If ``model`` is provided, treat it as explicit checkpoint/base path.
     2) Else if ``cfg.infer_checkpoint`` is set, use it directly.
-    3) Else auto-derive from ``cfg.train_mode`` and train realizations,
+    3) Else auto-derive from GAN model name and train realizations,
        then append ``-e{infer_epochs}.pth``.
 
     For explicit ``model`` values, accepted forms are:
     - Full ``.pth`` path
     - Path without ``.pth``
-    - Base model name (e.g. output of cfg.unet_model_name/cfg.gan_model_name)
+    - Base model name (e.g. output of cfg.gan_model_name)
       where this helper will try ``-e{infer_epochs}.pth``.
     """
     infer_train_realizations = (
@@ -68,24 +68,14 @@ def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=
     if cfg.infer_checkpoint is not None:
         checkpoint_path = cfg.infer_checkpoint
     else:
-        if cfg.train_mode == "gan":
-            auto_model = cfg.gan_model_name(
-                infer_train_realizations,
-                cfg.patch_size,
-                cfg.padding,
-                cfg.rotate,
-                cfg.N_p,
-                model_dir=cfg.model_dir,
-            )
-        else:
-            auto_model = cfg.unet_model_name(
-                infer_train_realizations,
-                cfg.patch_size,
-                cfg.padding,
-                cfg.rotate,
-                cfg.N_p,
-                model_dir=cfg.model_dir,
-            )
+        auto_model = cfg.gan_model_name(
+            infer_train_realizations,
+            cfg.patch_size,
+            cfg.padding,
+            cfg.rotate,
+            cfg.N_p,
+            model_dir=cfg.model_dir,
+        )
         checkpoint_path = f"{auto_model}-e{infer_epochs}.pth"
 
     if not os.path.exists(checkpoint_path):
@@ -94,7 +84,7 @@ def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=
 
 
 def _load_model(checkpoint_path, device):
-    """Load UNet generator from checkpoint."""
+    """Load generator from checkpoint."""
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     num_pools = _infer_num_pools(state_dict)
     model = nnmodel.UNet3D(n_classes=1, trilinear=True, base_channels=16, num_pools=num_pools)
@@ -185,7 +175,7 @@ def verify_realization(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loaded_model, num_pools = _load_model(checkpoint_path, device)
     print(
-        f"Mode: {cfg.train_mode}. Loaded: {checkpoint_path} "
+        f"GAN Loaded: {checkpoint_path} "
         f"(pools={num_pools}, device={device})"
     )
 

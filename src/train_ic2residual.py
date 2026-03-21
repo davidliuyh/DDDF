@@ -165,43 +165,28 @@ importlib.reload(train_module)
 
 # ── Section settings ──────────────────────────────────────────────
 overwrite_train = False   # True -> force retrain; False -> skip if model exists.
-train_mode = cfg.train_mode  # 'unet' | 'gan'  <- switch in config.py
 # ──────────────────────────────────────────────────────────────────
 
 
-if train_mode == 'gan':
-    model_name = cfg.gan_model_name(train_realizations, patch_size, padding, rotate, N_p, model_dir=model_dir)
-    train_module.train_gan(
-        training_data_path=train_path,
-        save_file_name=model_name,
+model_name = cfg.gan_model_name(train_realizations, patch_size, padding, rotate, N_p, model_dir=model_dir)
+train_module.train_gan(
+    training_data_path=train_path,
+    save_file_name=model_name,
 
-        batch_size=cfg.batch_size,
-        epochs=cfg.epochs,
-        lr_g=cfg.gan_lr_g,
-        lr_d=cfg.gan_lr_d,
-        lambda_pixel=cfg.gan_lambda_pixel,
-        n_disc_layers=cfg.gan_n_disc_layers,
-        lambda_fm=cfg.gan_lambda_fm,
-        d_update_interval=cfg.gan_d_update_interval,
-        use_spectral_norm=cfg.gan_use_spectral_norm,
-        checkpoint_interval=cfg.checkpoint_interval,
-        resume_checkpoint='auto',
-        overwrite=overwrite_train,
-    )
-else:
-    model_name = cfg.unet_model_name(train_realizations, patch_size, padding, rotate, N_p, model_dir=model_dir)
-    train_module.train_unet(
-        training_data_path=train_path,
-        save_file_name=model_name,
-
-        batch_size=cfg.batch_size,
-        epochs=cfg.epochs,
-        learning_rate=cfg.learning_rate,
-        weight_decay=cfg.weight_decay,
-        checkpoint_interval=cfg.checkpoint_interval,
-        resume_checkpoint='auto',
-        overwrite=overwrite_train,
-    )
+    batch_size=cfg.batch_size,
+    epochs=cfg.epochs,
+    lr_g=cfg.gan_lr_g,
+    lr_d=cfg.gan_lr_d,
+    lambda_pixel=cfg.gan_lambda_pixel,
+    n_disc_layers=cfg.gan_n_disc_layers,
+    lambda_fm=cfg.gan_lambda_fm,
+    lambda_gp=cfg.gan_lambda_gp,
+    d_update_interval=cfg.gan_d_update_interval,
+    use_spectral_norm=cfg.gan_use_spectral_norm,
+    checkpoint_interval=cfg.checkpoint_interval,
+    resume_checkpoint='auto',
+    overwrite=overwrite_train,
+)
 
 importlib.reload(cfg)
 importlib.reload(_pipeline_module)
@@ -220,14 +205,9 @@ infer_train_realizations = cfg.train_realizations    # realizations this model w
 # ──────────────────────────────────────────────────────────────────
 
 if infer_checkpoint is None:
-    if cfg.train_mode == 'gan':
-        _auto_model = cfg.gan_model_name(infer_train_realizations,
-                                         cfg.patch_size, cfg.padding,
-                                         cfg.rotate, N_p, model_dir=model_dir)
-    else:
-        _auto_model = cfg.unet_model_name(infer_train_realizations,
-                                          cfg.patch_size, cfg.padding,
-                                          cfg.rotate, N_p, model_dir=model_dir)
+    _auto_model = cfg.gan_model_name(infer_train_realizations,
+                                     cfg.patch_size, cfg.padding,
+                                     cfg.rotate, N_p, model_dir=model_dir)
     checkpoint_path = f'{_auto_model}-e{infer_epochs}.pth'
 else:
     checkpoint_path = infer_checkpoint
@@ -243,8 +223,8 @@ loaded_model.load_state_dict(state_dict)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 loaded_model.to(device)
-print(f'Mode: {cfg.train_mode}. Model loaded to {device}. '
-      f'Inference patch size = {infer_patch_size}, padding = {infer_padding}, overlap = {infer_overlap}')
+print(f'GAN model loaded to {device}. '
+    f'Inference patch size = {infer_patch_size}, padding = {infer_padding}, overlap = {infer_overlap}')
 print(f'Loaded: {checkpoint_path}  (pools={num_pools}, device={device})')
 
 k_cut = 0.06   # h/Mpc — matches the tophat0.4 best-fit filter
@@ -402,7 +382,6 @@ import torch
 import matplotlib.pyplot as plt
 
 # ── User settings ─────────────────────────────────────────────────
-analysis_mode = cfg.train_mode            # 'gan' or 'unet'
 analysis_realizations = cfg.train_realizations
 analysis_model_dir = model_dir
 # Optionally specify multiple model prefixes (without -eXX.ckpt) to compare runs.
@@ -415,14 +394,9 @@ analysis_prefixes = []
 # ──────────────────────────────────────────────────────────────────
 
 if not analysis_prefixes:
-    if analysis_mode == 'gan':
-        analysis_prefixes = [cfg.gan_model_name(
-            analysis_realizations, cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_model_dir
-        )]
-    else:
-        analysis_prefixes = [cfg.unet_model_name(
-            analysis_realizations, cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_model_dir
-        )]
+    analysis_prefixes = [cfg.gan_model_name(
+        analysis_realizations, cfg.patch_size, cfg.padding, cfg.rotate, N_p, analysis_model_dir
+    )]
 
 def _epoch_from_path(p):
     m = re.search(r'-e(\d+)\.ckpt$', str(p))
@@ -469,99 +443,86 @@ for pref in analysis_prefixes:
 if not all_runs:
     print('No usable ckpt found. Please verify model path and file names.')
 else:
-    if analysis_mode == 'gan':
-        fig, axes = plt.subplots(2, 1, figsize=(11, 8), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(11, 8), sharex=True)
 
-        for name, recs in all_runs.items():
-            epochs = np.array([r['epoch'] for r in recs], dtype=float)
-            g = np.array([r.get('loss_G', np.nan) for r in recs], dtype=float)
-            d = np.array([r.get('loss_D', np.nan) for r in recs], dtype=float)
-            lr_g = np.array([r.get('lr_G', np.nan) for r in recs], dtype=float)
-            lr_d = np.array([r.get('lr_D', np.nan) for r in recs], dtype=float)
+    for name, recs in all_runs.items():
+        epochs = np.array([r['epoch'] for r in recs], dtype=float)
+        g = np.array([r.get('loss_G', np.nan) for r in recs], dtype=float)
+        d = np.array([r.get('loss_D', np.nan) for r in recs], dtype=float)
+        lr_g = np.array([r.get('lr_G', np.nan) for r in recs], dtype=float)
+        lr_d = np.array([r.get('lr_D', np.nan) for r in recs], dtype=float)
 
-            axes[0].plot(epochs, g, marker='o', lw=1.8, label=f'{name} | G')
-            axes[0].plot(epochs, d, marker='x', lw=1.2, ls='--', label=f'{name} | D')
-            axes[1].plot(epochs, lr_g, marker='o', lw=1.4, label=f'{name} | lr_G')
-            axes[1].plot(epochs, lr_d, marker='x', lw=1.2, ls='--', label=f'{name} | lr_D')
+        axes[0].plot(epochs, g, marker='o', lw=1.8, label=f'{name} | G')
+        axes[0].plot(epochs, d, marker='x', lw=1.2, ls='--', label=f'{name} | D')
+        axes[1].plot(epochs, lr_g, marker='o', lw=1.4, label=f'{name} | lr_G')
+        axes[1].plot(epochs, lr_d, marker='x', lw=1.2, ls='--', label=f'{name} | lr_D')
 
-        axes[0].set_ylabel('Loss')
-        axes[0].set_title('GAN training diagnostics from checkpoints')
-        axes[0].grid(alpha=0.25)
-        axes[0].legend(ncol=2, fontsize=9)
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title('GAN training diagnostics from checkpoints')
+    axes[0].grid(alpha=0.25)
+    axes[0].legend(ncol=2, fontsize=9)
 
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Learning rate')
-        axes[1].set_yscale('log')
-        axes[1].grid(alpha=0.25)
-        axes[1].legend(ncol=2, fontsize=9)
-        plt.tight_layout(); plt.show()
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Learning rate')
+    axes[1].set_yscale('log')
+    axes[1].grid(alpha=0.25)
+    axes[1].legend(ncol=2, fontsize=9)
+    plt.tight_layout(); plt.show()
 
-        # ── Heuristic analysis ───────────────────────────────────────
-        print('\n[Automatic diagnostics and improvement suggestions]')
-        for name, recs in all_runs.items():
-            epochs = np.array([r['epoch'] for r in recs], dtype=float)
-            g = np.array([r.get('loss_G', np.nan) for r in recs], dtype=float)
-            d = np.array([r.get('loss_D', np.nan) for r in recs], dtype=float)
+    # ── Heuristic analysis ───────────────────────────────────────
+    print('\n[Automatic diagnostics and improvement suggestions]')
+    for name, recs in all_runs.items():
+        epochs = np.array([r['epoch'] for r in recs], dtype=float)
+        g = np.array([r.get('loss_G', np.nan) for r in recs], dtype=float)
+        d = np.array([r.get('loss_D', np.nan) for r in recs], dtype=float)
 
-            ok = np.isfinite(g) & np.isfinite(d)
-            if ok.sum() < 4:
-                print(f'\n{name}: Too few valid points (<4). Consider reducing checkpoint_interval to 1 or 2 first, then inspect the curves.')
-                continue
+        ok = np.isfinite(g) & np.isfinite(d)
+        if ok.sum() < 4:
+            print(f'\n{name}: Too few valid points (<4). Consider reducing checkpoint_interval to 1 or 2 first, then inspect the curves.')
+            continue
 
-            epochs = epochs[ok]; g = g[ok]; d = d[ok]
-            w = max(3, len(g) // 3)
+        epochs = epochs[ok]; g = g[ok]; d = d[ok]
+        w = max(3, len(g) // 3)
 
-            g_first, g_last = np.mean(g[:w]), np.mean(g[-w:])
-            d_first, d_last = np.mean(d[:w]), np.mean(d[-w:])
+        g_first, g_last = np.mean(g[:w]), np.mean(g[-w:])
+        d_first, d_last = np.mean(d[:w]), np.mean(d[-w:])
 
-            g_cv = np.std(g[-w:]) / (np.mean(g[-w:]) + 1e-12)
-            d_cv = np.std(d[-w:]) / (np.mean(d[-w:]) + 1e-12)
+        g_cv = np.std(g[-w:]) / (np.mean(g[-w:]) + 1e-12)
+        d_cv = np.std(d[-w:]) / (np.mean(d[-w:]) + 1e-12)
 
-            xw = np.arange(w, dtype=float)
-            g_slope = np.polyfit(xw, g[-w:], 1)[0]
-            d_slope = np.polyfit(xw, d[-w:], 1)[0]
+        xw = np.arange(w, dtype=float)
+        g_slope = np.polyfit(xw, g[-w:], 1)[0]
+        d_slope = np.polyfit(xw, d[-w:], 1)[0]
 
-            print(f'\n{name}:')
-            print(f'  G: {g_first:.4e} -> {g_last:.4e}, D: {d_first:.4e} -> {d_last:.4e}')
-            print(f'  Volatility coefficient: G={g_cv:.3f}, D={d_cv:.3f}; late-stage slope: dG/de={g_slope:.3e}, dD/de={d_slope:.3e}')
+        print(f'\n{name}:')
+        print(f'  G: {g_first:.4e} -> {g_last:.4e}, D: {d_first:.4e} -> {d_last:.4e}')
+        print(f'  Volatility coefficient: G={g_cv:.3f}, D={d_cv:.3f}; late-stage slope: dG/de={g_slope:.3e}, dD/de={d_slope:.3e}')
 
-            # Balance check.
-            if (d_last < 0.3 * g_last) and (g_slope >= 0):
-                print('  Diagnosis: discriminator is too strong; generator is suppressed.')
-                print('  Suggestion (training hyperparams): lower lr_D or raise lr_G (e.g., lr_D=0.5*lr_G), and increase d_update_interval from 2 to 3.')
-                print('  Suggestion (model): reduce n_disc_layers or strengthen spectral_norm (if numerically stable).')
-            elif (g_last < 0.4 * d_last) and (d_slope > 0):
-                print('  Diagnosis: discriminator is too weak or under-trained.')
-                print('  Suggestion (training hyperparams): moderately increase lr_D, or reduce d_update_interval back to 1-2.')
-                print('  Suggestion (model): increase n_disc_layers (3->4) or increase D base_channels.')
-            else:
-                print('  Diagnosis: G/D are roughly balanced.')
+        # Balance check.
+        if (d_last < 0.3 * g_last) and (g_slope >= 0):
+            print('  Diagnosis: discriminator is too strong; generator is suppressed.')
+            print('  Suggestion (training hyperparams): lower lr_D or raise lr_G (e.g., lr_D=0.5*lr_G), and increase d_update_interval from 2 to 3.')
+            print('  Suggestion (model): reduce n_disc_layers or strengthen spectral_norm (if numerically stable).')
+        elif (g_last < 0.4 * d_last) and (d_slope > 0):
+            print('  Diagnosis: discriminator is too weak or under-trained.')
+            print('  Suggestion (training hyperparams): moderately increase lr_D, or reduce d_update_interval back to 1-2.')
+            print('  Suggestion (model): increase n_disc_layers (3->4) or increase D base_channels.')
+        else:
+            print('  Diagnosis: G/D are roughly balanced.')
 
-            # Stability check.
-            if (g_cv > 0.25) or (d_cv > 0.25):
-                print('  Diagnosis: late-stage oscillation is relatively high.')
-                print('  Suggestion (training stability): reduce batch_size or enable/strengthen spectral_norm; moderately increase lambda_fm.')
+        # Stability check.
+        if (g_cv > 0.25) or (d_cv > 0.25):
+            print('  Diagnosis: late-stage oscillation is relatively high.')
+            print('  Suggestion (training stability): reduce batch_size or enable/strengthen spectral_norm; moderately increase lambda_fm.')
 
-            # Convergence / underfitting check.
-            if (g_last > 0.9 * g_first) and (d_last > 0.9 * d_first):
-                print('  Diagnosis: insufficient convergence (possible underfitting).')
-                print('  Suggestion (model): increase UNet capacity (base_channels or num_pools) and train for more epochs.')
-                print('  Suggestion (data): expand train_realizations, enable rotate=True, and increase overlap for more sample diversity.')
+        # Convergence / underfitting check.
+        if (g_last > 0.9 * g_first) and (d_last > 0.9 * d_first):
+            print('  Diagnosis: insufficient convergence (possible underfitting).')
+            print('  Suggestion (model): increase generator capacity (base_channels or num_pools) and train for more epochs.')
+            print('  Suggestion (data): expand train_realizations, enable rotate=True, and increase overlap for more sample diversity.')
 
-        print('\n[General improvement priority]')
-        print('1) Start from data: expand train_realizations (e.g., 8->16/32) and enable rotate.')
-        print('2) Then tune losses: adjust lambda_fm vs lambda_pixel while preserving pixel fidelity.')
-        print('3) Finally tune models: gradually adjust D depth and G capacity; avoid changing too many parameters at once.')
-
-    else:
-        # UNet-only fallback
-        plt.figure(figsize=(10, 4.5))
-        for name, recs in all_runs.items():
-            epochs = np.array([r['epoch'] for r in recs], dtype=float)
-            loss = np.array([r.get('loss', np.nan) for r in recs], dtype=float)
-            plt.plot(epochs, loss, marker='o', lw=1.8, label=name)
-        plt.xlabel('Epoch'); plt.ylabel('MSE loss')
-        plt.title('UNet training diagnostics from checkpoints')
-        plt.grid(alpha=0.25); plt.legend(); plt.tight_layout(); plt.show()
-        print('Current mode is UNet, so D curves are not included. To analyze G/D, switch train_mode to gan.')
+    print('\n[General improvement priority]')
+    print('1) Start from data: expand train_realizations (e.g., 8->16/32) and enable rotate.')
+    print('2) Then tune losses: adjust lambda_fm vs lambda_pixel while preserving pixel fidelity.')
+    print('3) Finally tune models: gradually adjust D depth and G capacity; avoid changing too many parameters at once.')
 

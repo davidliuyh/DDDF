@@ -6,150 +6,18 @@ import torch.nn.functional as F
 import model.model as nnmodel
 
 
-
-def train_unet(training_data_path, save_file_name, batch_size=64, epochs=10, learning_rate=1e-3, weight_decay=1e-5,
-               checkpoint_interval=100, resume_checkpoint=None, overwrite=False):
-    """
-    Train a UNet3D model with checkpoint resume support.
-
-    Args:
-        checkpoint_interval: Save one checkpoint every this many epochs.
-        resume_checkpoint: Checkpoint path (.ckpt); if provided, resume from it.
-                           If set to 'auto', find the latest matching checkpoint.
-        overwrite: If False and final model file exists, skip training.
-    """
-    
-    final_path = f'{save_file_name}-e{epochs}.pth'
-    if not overwrite and os.path.exists(final_path):
-        print(f"Model already exists, skipping training: {final_path}")
-        return
-    input_patches = np.load(training_data_path)['input_patches']
-    target_patches = np.load(training_data_path)['target_patches']
-
-    spatial_shape = input_patches.shape[1:4]
-    min_spatial = min(spatial_shape)
-    max_pools_allowed = int(np.floor(np.log2(min_spatial)))
-    auto_num_pools = max(1, min(5, max_pools_allowed))
-
-    print(f"Training patch spatial shape: {spatial_shape}")
-    print(f"Auto-selected number of pooling levels: {auto_num_pools} (min side={min_spatial})")
-
-    # Convert to PyTorch tensors and build dataset.
-    input_tensor = torch.from_numpy(input_patches).unsqueeze(1).float()
-    target_tensor = torch.from_numpy(target_patches).unsqueeze(1).float()
-
-    dataset = torch.utils.data.TensorDataset(input_tensor, target_tensor)
-    loader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, shuffle=False)
-
-    # Rebuild model with one output channel for regression.
-    model = nnmodel.UNet3D(
-        n_classes=1,
-        trilinear=True,
-        base_channels=16,
-        num_pools=auto_num_pools
-    )
-
-    # Parameter counts.
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel()
-                           for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-
-    # Training setup.
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    model.to(device)
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    criterion = nn.MSELoss()
-
-    torch.cuda.empty_cache()  # Clear cached GPU memory from earlier runs if any.
-
-    start_epoch = 0
-
-    # Auto-find latest checkpoint.
-    if resume_checkpoint == 'auto':
-        ckpt_dir = os.path.dirname(save_file_name) or '.'
-        ckpt_prefix = os.path.basename(save_file_name)
-        candidates = [
-            f for f in os.listdir(ckpt_dir)
-            if f.startswith(ckpt_prefix) and f.endswith('.ckpt')
-        ]
-        if candidates:
-            candidates.sort(key=lambda f: int(f.rsplit('-e', 1)[-1].replace('.ckpt', '')))
-            resume_checkpoint = os.path.join(ckpt_dir, candidates[-1])
-        else:
-            print("No checkpoint found, starting from scratch.")
-            resume_checkpoint = None
-
-    # Resume from checkpoint.
-    if resume_checkpoint is not None:
-        print(f"Resuming training from checkpoint: {resume_checkpoint}")
-        checkpoint = torch.load(resume_checkpoint, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch']  # Number of completed epochs.
-        print(f"Completed {start_epoch} epochs, continue training to epoch {epochs}.")
-
-    for epoch in range(start_epoch, epochs):
-        print(f'Starting epoch {epoch+1}/{epochs}...')
-        model.train()
-        running_loss = 0.0
-        for batch_idx, (xb, yb) in enumerate(loader):
-            xb = xb.to(device)
-            yb = yb.to(device)
-            optimizer.zero_grad()
-            out = model(xb)
-            # Subtract per-patch mean before computing loss so the network
-            # cannot learn a mean-field bias correlated with the IC large-scale
-            # modes, which would otherwise leak spurious large-scale power.
-            out_dm = out - out.mean(dim=[2, 3, 4], keepdim=True)
-            yb_dm  = yb  - yb.mean(dim=[2, 3, 4], keepdim=True)
-            loss = criterion(out_dm, yb_dm)
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item() * xb.size(0)
-
-            if batch_idx % 10 == 0:
-                print(f"  [Epoch {epoch+1}/{epochs}] batch {batch_idx+1}/{len(loader)}, "
-                      f"batch_loss={loss.item():.6f}")
-
-        epoch_loss = running_loss / len(dataset)
-        print(f'Epoch {epoch+1}/{epochs}, loss={epoch_loss:.6f}, lr={learning_rate:.2e}')
-
-        # Save checkpoint periodically (full training state).
-        if (epoch + 1) % checkpoint_interval == 0:
-            ckpt_path = f'{save_file_name}-e{epoch+1}.ckpt'
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': epoch_loss,
-            }, ckpt_path)
-            print(f"Checkpoint saved: {ckpt_path}")
-
-        # Save trained model to file.
-        if epochs >= 100 and (epoch + 1) % 100 == 0:
-            torch.save(model.state_dict(), f'{save_file_name}-e{epoch+1}.pth')
-
-    # Save trained model to file.
-    torch.save(model.state_dict(), f'{save_file_name}-e{epochs}.pth')
-
-
 def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
               lr_g=1e-4, lr_d=1e-4, lambda_pixel=10.0, n_disc_layers=3,
               lambda_fm=10.0, d_update_interval=2, use_spectral_norm=True,
-              checkpoint_interval=10, resume_checkpoint=None, overwrite=False):
-    """Conditional GAN (LSGAN / Pix2Pix3D) training.
+              checkpoint_interval=10, resume_checkpoint=None, overwrite=False,
+              lambda_gp=10.0):
+    """Conditional GAN training with WGAN-GP adversarial loss.
 
-    Generator  : UNet3D (same architecture as train_unet)
+    Generator  : UNet3D
     Discriminator: PatchDiscriminator3D conditioned on IC
 
-    Loss_D = 0.5 * MSE(D(IC,real) - 1)² + 0.5 * MSE(D(IC,fake))²
-    Loss_G = 0.5 * MSE(D(IC,fake) - 1)²              [adversarial]
+    Loss_D = E[D(IC,fake)] - E[D(IC,real)] + lambda_gp * GP
+    Loss_G = -E[D(IC,fake)]                           [adversarial]
            + lambda_pixel * MSE(fake, real)            [pixel]
            + lambda_fm    * FeatureMatching(fake,real)  [FM]
 
@@ -194,10 +62,12 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
 
     net_G = nnmodel.UNet3D(n_classes=1, trilinear=True,
                             base_channels=16, num_pools=num_pools).to(device)
+    sn_impl = 'native'
     net_D = nnmodel.PatchDiscriminator3D(in_channels=2,
                                           base_channels=32,
                                           n_layers=n_disc_layers,
-                                          use_spectral_norm=use_spectral_norm).to(device)
+                                          use_spectral_norm=use_spectral_norm,
+                                          spectral_norm_impl=sn_impl).to(device)
 
     total_G = sum(p.numel() for p in net_G.parameters())
     total_D = sum(p.numel() for p in net_D.parameters())
@@ -205,7 +75,7 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
     print(f"Discriminator parameters: {total_D:,}")
     print(f"lambda_pixel={lambda_pixel}, lambda_fm={lambda_fm}, "
           f"n_disc_layers={n_disc_layers}, d_update_interval={d_update_interval}, "
-          f"use_spectral_norm={use_spectral_norm}")
+            f"use_spectral_norm={use_spectral_norm}, sn_impl={sn_impl}, batch_size={batch_size}")
 
     opt_G = torch.optim.AdamW(net_G.parameters(), lr=lr_g, betas=(0.5, 0.999))
     opt_D = torch.optim.AdamW(net_D.parameters(), lr=lr_d, betas=(0.5, 0.999))
@@ -216,11 +86,27 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
     scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt_D, T_max=epochs, eta_min=lr_d * 0.01)
 
-    criterion_GAN   = nn.MSELoss()           # LSGAN
     criterion_pixel = nn.MSELoss()
 
     torch.cuda.empty_cache()
     start_epoch = 0
+
+    def _gradient_penalty(cond_x, real_y, fake_y):
+        bsz = real_y.size(0)
+        alpha = torch.rand(bsz, 1, 1, 1, 1, device=device)
+        interp = (alpha * real_y + (1.0 - alpha) * fake_y).requires_grad_(True)
+        pred_interp = net_D(cond_x, interp)
+        grad_outputs = torch.ones_like(pred_interp, device=device)
+        gradients = torch.autograd.grad(
+            outputs=pred_interp,
+            inputs=interp,
+            grad_outputs=grad_outputs,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+        gradients = gradients.view(bsz, -1)
+        return ((gradients.norm(2, dim=1) - 1.0) ** 2).mean()
 
     # ── Auto-resume ────────────────────────────────────────────────────────────
     # overwrite=True means "retrain from scratch" — skip any existing checkpoint.
@@ -265,23 +151,41 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
         for batch_idx, (xb, yb) in enumerate(loader):
             xb = xb.to(device)
             yb = yb.to(device)
-            # per-patch mean subtraction (consistent with train_unet)
+            # Per-patch mean subtraction keeps the generator focused on structure.
             xb_dm = (xb - xb.mean(dim=[2, 3, 4], keepdim=True)).contiguous()
             yb_dm = (yb - yb.mean(dim=[2, 3, 4], keepdim=True)).contiguous()
 
             fake_dm = net_G(xb_dm)
             fake_dm = (fake_dm - fake_dm.mean(dim=[2, 3, 4], keepdim=True)).contiguous()
 
-            def _disable_sn_and_reset_d(err):
-                nonlocal net_D, opt_D, scheduler_D, use_spectral_norm
+            if xb_dm.ndim != 5 or yb_dm.ndim != 5 or fake_dm.ndim != 5:
+                raise RuntimeError(
+                    f"Expected 5D tensors [B,C,D,H,W], got "
+                    f"xb={tuple(xb_dm.shape)}, yb={tuple(yb_dm.shape)}, fake={tuple(fake_dm.shape)}"
+                )
+            if xb_dm.shape != yb_dm.shape or xb_dm.shape != fake_dm.shape:
+                raise RuntimeError(
+                    f"Discriminator input shape mismatch: "
+                    f"xb={tuple(xb_dm.shape)}, yb={tuple(yb_dm.shape)}, fake={tuple(fake_dm.shape)}"
+                )
+            if xb_dm.shape[1] != 1:
+                raise RuntimeError(
+                    f"Expected single-channel IC/residual patches, got channel={xb_dm.shape[1]}"
+                )
+
+            def _switch_sn_impl_and_reset_d(err):
+                nonlocal net_D, opt_D, scheduler_D, sn_impl
                 if use_spectral_norm and 'CUBLAS_STATUS_INVALID_VALUE' in str(err):
-                    print('Detected CUBLAS_STATUS_INVALID_VALUE; disabling discriminator spectral norm and rebuilding D automatically.')
-                    use_spectral_norm = False
+                    if sn_impl == 'cpu_power_iter':
+                        return False
+                    print('Detected CUBLAS_STATUS_INVALID_VALUE with native spectral norm; switching discriminator SN to cpu_power_iter and rebuilding D.')
+                    sn_impl = 'cpu_power_iter'
                     net_D = nnmodel.PatchDiscriminator3D(
                         in_channels=2,
                         base_channels=32,
                         n_layers=n_disc_layers,
-                        use_spectral_norm=False,
+                        use_spectral_norm=True,
+                        spectral_norm_impl=sn_impl,
                     ).to(device)
                     opt_D = torch.optim.AdamW(net_D.parameters(), lr=lr_d, betas=(0.5, 0.999))
                     scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -297,19 +201,30 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
                     pred_real = net_D(xb_dm, yb_dm)
                     pred_fake = net_D(xb_dm, fake_dm.detach())
                 except RuntimeError as e:
-                    if _disable_sn_and_reset_d(e):
+                    if _switch_sn_impl_and_reset_d(e):
                         pred_real = net_D(xb_dm, yb_dm)
                         pred_fake = net_D(xb_dm, fake_dm.detach())
                     else:
                         raise
-                ones  = torch.ones_like(pred_real)
-                zeros = torch.zeros_like(pred_fake)
-                loss_D = 0.5 * (criterion_GAN(pred_real, ones) +
-                                criterion_GAN(pred_fake, zeros))
-                loss_D.backward()
-                opt_D.step()
+                gp = _gradient_penalty(xb_dm, yb_dm, fake_dm.detach())
+                loss_D = pred_fake.mean() - pred_real.mean() + lambda_gp * gp
+                try:
+                    loss_D.backward()
+                    opt_D.step()
+                except RuntimeError as e:
+                    if _switch_sn_impl_and_reset_d(e):
+                        opt_D.zero_grad()
+                        pred_real = net_D(xb_dm, yb_dm)
+                        pred_fake = net_D(xb_dm, fake_dm.detach())
+                        gp = _gradient_penalty(xb_dm, yb_dm, fake_dm.detach())
+                        loss_D = pred_fake.mean() - pred_real.mean() + lambda_gp * gp
+                        loss_D.backward()
+                        opt_D.step()
+                    else:
+                        raise
             else:
                 loss_D = torch.tensor(0.0, device=device)
+                gp = torch.tensor(0.0, device=device)
 
             # ── Train Generator ───────────────────────────────────────────────
             opt_G.zero_grad()
@@ -320,7 +235,7 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
                         _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
                     pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
                 except RuntimeError as e:
-                    if _disable_sn_and_reset_d(e):
+                    if _switch_sn_impl_and_reset_d(e):
                         with torch.no_grad():
                             _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
                         pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
@@ -332,17 +247,37 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
                 try:
                     pred_fake_G = net_D(xb_dm, fake_dm)
                 except RuntimeError as e:
-                    if _disable_sn_and_reset_d(e):
+                    if _switch_sn_impl_and_reset_d(e):
                         pred_fake_G = net_D(xb_dm, fake_dm)
                     else:
                         raise
                 loss_fm = torch.tensor(0.0, device=device)
 
-            loss_adv   = 0.5 * criterion_GAN(pred_fake_G, torch.ones_like(pred_fake_G))
+            loss_adv   = -pred_fake_G.mean()
             loss_pixel = criterion_pixel(fake_dm, yb_dm)
             loss_G = loss_adv + lambda_pixel * loss_pixel + lambda_fm * loss_fm
-            loss_G.backward()
-            opt_G.step()
+            try:
+                loss_G.backward()
+                opt_G.step()
+            except RuntimeError as e:
+                if _switch_sn_impl_and_reset_d(e):
+                    opt_G.zero_grad()
+                    if lambda_fm > 0:
+                        with torch.no_grad():
+                            _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
+                        pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
+                        loss_fm = torch.stack([F.mse_loss(ff, fr)
+                                               for ff, fr in zip(feats_fake, feats_real)]).mean()
+                    else:
+                        pred_fake_G = net_D(xb_dm, fake_dm)
+                        loss_fm = torch.tensor(0.0, device=device)
+                    loss_adv   = -pred_fake_G.mean()
+                    loss_pixel = criterion_pixel(fake_dm, yb_dm)
+                    loss_G = loss_adv + lambda_pixel * loss_pixel + lambda_fm * loss_fm
+                    loss_G.backward()
+                    opt_G.step()
+                else:
+                    raise
 
             sum_G += loss_G.item() * xb.size(0)
             sum_D += loss_D.item() * xb.size(0)
@@ -352,7 +287,7 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
                       f"G={loss_G.item():.4f} "
                       f"(adv={loss_adv.item():.4f}, px={loss_pixel.item():.4f}, "
                       f"fm={loss_fm.item():.4f}), "
-                      f"D={loss_D.item():.4f}")
+                        f"D={loss_D.item():.4f}, gp={gp.item():.4f}")
 
         scheduler_G.step()
         scheduler_D.step()

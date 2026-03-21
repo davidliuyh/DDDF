@@ -81,14 +81,9 @@ overlap             = 0.0
 rotate              = True
 batch_size          = 512
 epochs              = 25
-learning_rate       = 1e-3
-weight_decay        = 1e-5
 checkpoint_interval = 1
 
-# ── Training mode ─────────────────────────────────────────────────────────────
-train_mode          = 'gan'  # 'unet' | 'gan'
-
-# ── GAN hyperparameters (used when train_mode = 'gan') ────────────────────────
+# ── GAN hyperparameters ────────────────────────────────────────────────────────
 # Preserve original GAN defaults for easy comparison / rollback.
 gan_v1 = {
     'data_dir': 'tophat0.4',
@@ -101,28 +96,48 @@ gan_v1 = {
     'gan_lr_d': 5e-5,
     'gan_n_disc_layers': 3,
     'gan_lambda_fm': 20.0,
+    'gan_lambda_gp': 10.0,
     'gan_d_update_interval': 3,
     'gan_use_spectral_norm': False,
     'infer_overlap': 0.0,
 }
 
 gan_v2 = {
-    'data_dir': 'tophat0.4v2',
+    'data_dir': 'tophat0.4',
     'model_dir': 'tophat0.4v2',
     'overlap': 0.0,
     'batch_size': 512,
-    'epochs': 25,
+    'epochs': 55,
     'gan_lambda_pixel': 5.0,
     'gan_lr_g': 1e-4,
     'gan_lr_d': 5e-5,
     'gan_n_disc_layers': 3,
     'gan_lambda_fm': 20.0,
+    'gan_lambda_gp': 10.0,
+    'gan_d_update_interval': 3,
+    'gan_use_spectral_norm': True,
+    'infer_overlap': 0.0,
+}
+
+gan_v3 = {
+    'data_dir': 'tophat0.4',
+    'model_dir': 'tophat0.4v3',
+    'overlap': 0.0,
+    'batch_size': 1024,
+    'epochs': 100,
+    'gan_lambda_pixel': 5.0,
+    'gan_lr_g': 1e-4,
+    'gan_lr_d': 5e-5,
+    'gan_n_disc_layers': 3,
+    'gan_lambda_fm': 20.0,
+    'gan_lambda_gp': 10.0,
     'gan_d_update_interval': 3,
     'gan_use_spectral_norm': False,
     'infer_overlap': 0.0,
 }
 
-active_gan_defaults = gan_v1
+
+active_gan_defaults = gan_v2
 
 # Active subdirs and hyperparameters are always sourced from the selected preset.
 data_dir              = active_gan_defaults.get('data_dir', active_gan_defaults.get('filter_dir'))
@@ -137,6 +152,7 @@ gan_lr_g              = active_gan_defaults['gan_lr_g']
 gan_lr_d              = active_gan_defaults['gan_lr_d']
 gan_n_disc_layers     = active_gan_defaults['gan_n_disc_layers']
 gan_lambda_fm         = active_gan_defaults['gan_lambda_fm']
+gan_lambda_gp         = active_gan_defaults['gan_lambda_gp']
 gan_d_update_interval = active_gan_defaults['gan_d_update_interval']
 gan_use_spectral_norm = active_gan_defaults['gan_use_spectral_norm']
 
@@ -144,7 +160,7 @@ gan_use_spectral_norm = active_gan_defaults['gan_use_spectral_norm']
 infer_patch_size  = 20
 infer_padding     = 2
 infer_overlap     = 0.0
-infer_epochs      = 25    # which epoch checkpoint to load (when infer_checkpoint is None)
+infer_epochs      = 55    # which epoch checkpoint to load (when infer_checkpoint is None)
 infer_checkpoint  = None  # None → auto-derive from training model_name + infer_epochs
                           # str  → explicit path to a .pth checkpoint
 
@@ -183,13 +199,6 @@ def training_data_path(realizations, ps=patch_size, p=padding, ov=overlap,
     ddir = _resolve_data_dir(data_dir=data_dir, filter_dir=filter_dir)
     tag = f'IC2RES-N{N_p}PS{ps}P{p}O{int(100 * ov):02d}Rotate{rot}-{realization_tag(realizations)}'
     return f'{data_path}/{ddir}/training-data-{tag}.npz'
-
-def unet_model_name(realizations, ps=patch_size, p=padding,
-                    rot=rotate, N_p=N_p, model_dir=None, filter_dir=None):
-    mdir = _resolve_model_dir(model_dir=model_dir, filter_dir=filter_dir)
-    rtag = realization_tag(realizations)
-    return f'{model_path}/{mdir}/unet-IC2RES-N{N_p}PS{ps}P{p}Rotate{rot}-{rtag}'
-
 
 def gan_model_name(realizations, ps=patch_size, p=padding,
                    rot=rotate, N_p=N_p, model_dir=None, filter_dir=None):
