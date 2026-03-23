@@ -79,8 +79,6 @@ patch_size          = 20
 padding             = 2
 overlap             = 0.0
 rotate              = True
-batch_size          = 512
-epochs              = 25
 checkpoint_interval = 1
 
 # ── GAN hyperparameters ────────────────────────────────────────────────────────
@@ -124,7 +122,24 @@ gan_v3 = {
     'model_dir': 'tophat0.4v3',
     'overlap': 0.0,
     'batch_size': 1024,
-    'epochs': 100,
+    'epochs': 50,
+    'gan_lambda_pixel': 5.0,
+    'gan_lr_g': 1e-4,
+    'gan_lr_d': 5e-5,
+    'gan_n_disc_layers': 3,
+    'gan_lambda_fm': 20.0,
+    'gan_lambda_gp': 10.0,
+    'gan_d_update_interval': 3,
+    'gan_use_spectral_norm': False,
+    'infer_overlap': 0.0,
+}
+
+gan_v4 = {
+    'data_dir': 'tophat0.4',
+    'model_dir': 'tophat0.4v4',
+    'overlap': 0.0,
+    'batch_size': 1024,
+    'epochs': 200,
     'gan_lambda_pixel': 5.0,
     'gan_lr_g': 1e-4,
     'gan_lr_d': 5e-5,
@@ -137,7 +152,7 @@ gan_v3 = {
 }
 
 
-active_gan_defaults = gan_v2
+active_gan_defaults = gan_v4
 
 # Active subdirs and hyperparameters are always sourced from the selected preset.
 data_dir              = active_gan_defaults.get('data_dir', active_gan_defaults.get('filter_dir'))
@@ -159,8 +174,8 @@ gan_use_spectral_norm = active_gan_defaults['gan_use_spectral_norm']
 # ── Inference hyperparameters ─────────────────────────────────────────────────
 infer_patch_size  = 20
 infer_padding     = 2
-infer_overlap     = 0.0
-infer_epochs      = 55    # which epoch checkpoint to load (when infer_checkpoint is None)
+infer_overlap     = 0.1
+infer_epochs      = 200    # which epoch checkpoint to load (when infer_checkpoint is None)
 infer_checkpoint  = None  # None → auto-derive from training model_name + infer_epochs
                           # str  → explicit path to a .pth checkpoint
 

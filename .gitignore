@@ -2,3 +2,6 @@
 *.sh
 __pycache__
 */__pycache__
+*.err
+*.out
+./src/ic2residual.py

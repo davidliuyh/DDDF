@@ -123,7 +123,6 @@ def verify_realization(
     coef_file : str or None
         Optional best-fit coefficient file path.
     """
-    importlib.reload(cfg)
 
     N_p = cfg.N_p
     L = cfg.L
@@ -229,8 +228,43 @@ def verify_realization(
     plt.tight_layout()
     plt.show()
 
+    # Residual distribution
+    residual_values = delta_residual.ravel()
+    residual_mean = float(np.mean(residual_values))
+    residual_std = float(np.std(residual_values))
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(
+        residual_values,
+        bins=120,
+        range=(-1.0, 1.0),
+        density=True,
+        alpha=0.8,
+        color="tab:blue",
+    )
+    ax.set_xlim(-1.0, 1.0)
+    ax.set_xlabel(r"$\Delta\delta = \delta_{\rm recovered} - \delta_{\rm final}$")
+    ax.set_ylabel("PDF")
+    ax.set_title(
+        f"[r{realization}] Residual distribution "
+        f"(mean={residual_mean:.3e}, std={residual_std:.3e})"
+    )
+    plt.tight_layout()
+    plt.show()
+
     # Power spectra
     pks = [PKL.Pk(d, boxsize, axis=0, MAS=MAS, threads=threads, verbose=False) for d in deltas]
+    k_values = pks[0].k3D
+    nyquist = float(veck_main.Nyquist_freq)
+    nyquist_idx = int(np.argmin(np.abs(k_values - nyquist)))
+    nyquist_k = float(k_values[nyquist_idx])
+    print(
+        f"[r{realization}] Nyquist target k = {nyquist:.6f}, "
+        f"nearest-bin k = {nyquist_k:.6f}"
+    )
+    for pk, lab in zip(pks, labels):
+        ratio_nyquist = float(pk.Pk[nyquist_idx, 0] / pks[0].Pk[nyquist_idx, 0])
+        print(f"[r{realization}] {lab} P/P_N-body @Nyquist = {ratio_nyquist * 100:.2f}%")
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.set_xscale("log")
