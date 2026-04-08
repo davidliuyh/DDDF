@@ -123,6 +123,7 @@ def verify_realization(
     coef_file : str or None
         Optional best-fit coefficient file path.
     """
+    importlib.reload(cfg)  # ensure config changes are picked up when running multiple times
 
     N_p = cfg.N_p
     L = cfg.L
@@ -262,9 +263,6 @@ def verify_realization(
         f"[r{realization}] Nyquist target k = {nyquist:.6f}, "
         f"nearest-bin k = {nyquist_k:.6f}"
     )
-    for pk, lab in zip(pks, labels):
-        ratio_nyquist = float(pk.Pk[nyquist_idx, 0] / pks[0].Pk[nyquist_idx, 0])
-        print(f"[r{realization}] {lab} P/P_N-body @Nyquist = {ratio_nyquist * 100:.2f}%")
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.set_xscale("log")
@@ -278,22 +276,25 @@ def verify_realization(
     ax.legend()
     plt.title(f"[r{realization}] Matter power spectrum z=0")
     plt.show()
+    for pk, lab in zip(pks, labels):
+        ratio_nyquist = float(pk.Pk[nyquist_idx, 0] / pks[0].Pk[nyquist_idx, 0])
+        print(f"[r{realization}] {lab} P/P_N-body @Nyquist = {ratio_nyquist * 100:.2f}%")
 
-    # Bispectrum
-    k1, k2 = 0.2, 0.2
-    theta = np.linspace(0, np.pi, 25)
-    bks = [PKL.Bk(d, boxsize, k1, k2, theta, MAS=MAS, threads=threads) for d in deltas]
+    # # Bispectrum
+    # k1, k2 = 0.2, 0.2
+    # theta = np.linspace(0, np.pi, 25)
+    # bks = [PKL.Bk(d, boxsize, k1, k2, theta, MAS=MAS, threads=threads) for d in deltas]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.set_xlabel(r"$\theta$")
-    ax.set_ylabel(r"$B/B_{\rm N\text{-}body}$")
-    ax.set_xlim(0, np.pi)
-    ax.set_ylim(0, 1.5)
-    ax.set_title(f"[r{realization}] Bispectrum z=0, k1={k1}, k2={k2}")
-    for bk, lab in zip(bks, labels):
-        ax.plot(theta, bk.B / bks[0].B, label=lab)
-    ax.legend()
-    plt.show()
+    # fig, ax = plt.subplots(figsize=(10, 5))
+    # ax.set_xlabel(r"$\theta$")
+    # ax.set_ylabel(r"$B/B_{\rm N\text{-}body}$")
+    # ax.set_xlim(0, np.pi)
+    # ax.set_ylim(0, 1.5)
+    # ax.set_title(f"[r{realization}] Bispectrum z=0, k1={k1}, k2={k2}")
+    # for bk, lab in zip(bks, labels):
+    #     ax.plot(theta, bk.B / bks[0].B, label=lab)
+    # ax.legend()
+    # plt.show()
 
     # chi^2 vs N-body (k <= 0.3)
     mask_k = pks[0].k3D <= 0.3

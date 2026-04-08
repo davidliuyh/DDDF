@@ -129,7 +129,7 @@ free_gpu_memory()
 importlib.reload(cfg)
 
 # ── Section settings ──────────────────────────────────────────────
-overwrite_train = True   # True -> force retrain; False -> skip if model exists.
+overwrite_train = False   # True -> force retrain; False -> skip if model exists.
 # ──────────────────────────────────────────────────────────────────
 
 model_name = cfg.gan_model_name(train_realizations, patch_size, padding, rotate, N_p, model_dir=model_dir)

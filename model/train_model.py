@@ -1,9 +1,12 @@
 import os
+import time
+from datetime import datetime, timedelta
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import model.model as nnmodel
+from tqdm.auto import tqdm
 
 
 def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
@@ -143,12 +146,25 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
         print(f"Completed {start_epoch} epochs, continue training to epoch {epochs}.")
 
     # ── Training loop ──────────────────────────────────────────────────────────
+    train_start_time = time.perf_counter()
+    sum_epoch_seconds = 0.0
+
     for epoch in range(start_epoch, epochs):
         print(f'Starting epoch {epoch+1}/{epochs}...')
+        epoch_start_time = time.perf_counter()
         net_G.train(); net_D.train()
         sum_G = sum_D = 0.0
 
-        for batch_idx, (xb, yb) in enumerate(loader):
+        epoch_bar = tqdm(
+            loader,
+            total=len(loader),
+            desc=f'Epoch {epoch+1}/{epochs}',
+            unit='batch',
+            dynamic_ncols=True,
+            leave=True,
+        )
+
+        for batch_idx, (xb, yb) in enumerate(epoch_bar, start=1):
             xb = xb.to(device)
             yb = yb.to(device)
             # Per-patch mean subtraction keeps the generator focused on structure.
@@ -282,19 +298,37 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
             sum_G += loss_G.item() * xb.size(0)
             sum_D += loss_D.item() * xb.size(0)
 
-            if batch_idx % 10 == 0:
-                print(f"  [Epoch {epoch+1}/{epochs}] batch {batch_idx+1}/{len(loader)}, "
-                      f"G={loss_G.item():.4f} "
-                      f"(adv={loss_adv.item():.4f}, px={loss_pixel.item():.4f}, "
-                      f"fm={loss_fm.item():.4f}), "
-                        f"D={loss_D.item():.4f}, gp={gp.item():.4f}")
+            batch_elapsed = time.perf_counter() - epoch_start_time
+            avg_batch_seconds = batch_elapsed / batch_idx
+            remaining_batches = len(loader) - batch_idx
+            epoch_eta_dt = datetime.now() + timedelta(seconds=avg_batch_seconds * remaining_batches)
+            epoch_bar.set_postfix(
+                G=f'{loss_G.item():.4f}',
+                D=f'{loss_D.item():.4f}',
+                px=f'{loss_pixel.item():.4f}',
+                fm=f'{loss_fm.item():.4f}',
+                gp=f'{gp.item():.4f}',
+                eta=epoch_eta_dt.strftime('%H:%M:%S'),
+            )
+
+        epoch_bar.close()
 
         scheduler_G.step()
         scheduler_D.step()
 
         n = len(input_patches)
-        print(f"Epoch {epoch+1}/{epochs},  loss_G={sum_G/n:.6f},  loss_D={sum_D/n:.6f},  "
-              f"lr_G={scheduler_G.get_last_lr()[0]:.2e},  lr_D={scheduler_D.get_last_lr()[0]:.2e}")
+        epoch_seconds = time.perf_counter() - epoch_start_time
+        sum_epoch_seconds += epoch_seconds
+        done_epochs = epoch - start_epoch + 1
+        avg_epoch_seconds = sum_epoch_seconds / done_epochs
+        remaining_epochs = epochs - (epoch + 1)
+        train_eta_dt = datetime.now() + timedelta(seconds=avg_epoch_seconds * remaining_epochs)
+        print(
+            f"Epoch {epoch+1}/{epochs},  loss_G={sum_G/n:.6f},  loss_D={sum_D/n:.6f},  "
+            f"lr_G={scheduler_G.get_last_lr()[0]:.2e},  lr_D={scheduler_D.get_last_lr()[0]:.2e},  "
+            f"epoch_time={epoch_seconds:.1f}s,  avg_epoch_time={avg_epoch_seconds:.1f}s,  "
+            f"train_eta={train_eta_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
 
         if (epoch + 1) % checkpoint_interval == 0:
             ckpt_path = f'{save_file_name}-e{epoch+1}.ckpt'
@@ -316,4 +350,6 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
 
     # Save generator-only .pth for inference
     torch.save(net_G.state_dict(), f'{save_file_name}-e{epochs}.pth')
+    total_train_seconds = time.perf_counter() - train_start_time
+    print(f"Total training time: {total_train_seconds:.1f}s")
     print(f"GAN training complete, generator saved to: {save_file_name}-e{epochs}.pth")
