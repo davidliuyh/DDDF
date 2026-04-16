@@ -709,6 +709,26 @@ def _periodic_delta(a: np.ndarray, b: np.ndarray, box: float) -> np.ndarray:
     return d
 
 
+def _match_particle_ids(query_ids: np.ndarray, ref_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Return matching indices (query_idx, ref_idx) using vectorized ID lookup."""
+    q = np.asarray(query_ids, dtype=np.uint32)
+    r = np.asarray(ref_ids, dtype=np.uint32)
+    if q.size == 0 or r.size == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+    order = np.argsort(r, kind="mergesort")
+    r_sorted = r[order]
+    loc = np.searchsorted(r_sorted, q, side="left")
+    valid = loc < r_sorted.size
+    valid &= r_sorted[np.clip(loc, 0, r_sorted.size - 1)] == q
+    if not np.any(valid):
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+    sel_query = np.nonzero(valid)[0].astype(np.int64, copy=False)
+    sel_ref = order[loc[valid]].astype(np.int64, copy=False)
+    return sel_query, sel_ref
+
+
 def compare_z127_positions(
     recon_positions: np.ndarray,
     recon_ids: np.ndarray,
@@ -718,29 +738,22 @@ def compare_z127_positions(
 ) -> Dict[str, float]:
     ref_pos, ref_ids = _load_hdf5_particles(ic_ref, max_files=max_files)
 
-    map_ref = {int(pid): i for i, pid in enumerate(ref_ids.tolist())}
-    sel_rec: List[int] = []
-    sel_ref: List[int] = []
-    for i, pid in enumerate(recon_ids.tolist()):
-        j = map_ref.get(int(pid))
-        if j is not None:
-            sel_rec.append(i)
-            sel_ref.append(j)
-    if not sel_rec:
+    sel_rec, sel_ref = _match_particle_ids(recon_ids, ref_ids)
+    if sel_rec.size == 0:
         return {
             "n_match": 0,
             "pos_rms": np.nan,
             "pos_max": np.nan,
         }
 
-    r = recon_positions[np.asarray(sel_rec, dtype=np.int64)]
-    t = ref_pos[np.asarray(sel_ref, dtype=np.int64)]
+    r = recon_positions[sel_rec]
+    t = ref_pos[sel_ref]
     d = _periodic_delta(r, t, box)
 
     rms = float(np.sqrt(np.mean(np.sum(d * d, axis=1))))
     dnorm = np.sqrt(np.sum(d * d, axis=1))
     return {
-        "n_match": float(len(sel_rec)),
+        "n_match": float(sel_rec.size),
         "pos_rms": rms,
         "pos_max": float(np.max(dnorm)),
         "p50": float(np.percentile(dnorm, 50.0)),
@@ -758,28 +771,20 @@ def compare_with_snapshot_z0(
 ) -> Dict[str, float]:
     snap_pos, snap_ids = _load_hdf5_particles(snapshot_dir, max_files=max_files)
 
-    map_snap = {int(pid): i for i, pid in enumerate(snap_ids.tolist())}
-    sel_rec: List[int] = []
-    sel_snap: List[int] = []
-    for i, pid in enumerate(recon_ids.tolist()):
-        j = map_snap.get(int(pid))
-        if j is not None:
-            sel_rec.append(i)
-            sel_snap.append(j)
-
-    if not sel_rec:
+    sel_rec, sel_snap = _match_particle_ids(recon_ids, snap_ids)
+    if sel_rec.size == 0:
         return {
             "n_match": 0,
             "disp_rms": np.nan,
             "disp_max": np.nan,
         }
 
-    r = recon_positions[np.asarray(sel_rec, dtype=np.int64)]
-    s = snap_pos[np.asarray(sel_snap, dtype=np.int64)]
+    r = recon_positions[sel_rec]
+    s = snap_pos[sel_snap]
     d = _periodic_delta(s, r, box)
     dnorm = np.sqrt(np.sum(d * d, axis=1))
     return {
-        "n_match": float(len(sel_rec)),
+        "n_match": float(sel_rec.size),
         "disp_rms": float(np.sqrt(np.mean(dnorm * dnorm))),
         "disp_max": float(np.max(dnorm)),
         "p50": float(np.percentile(dnorm, 50.0)),
@@ -869,16 +874,8 @@ def compare_power_spectrum_z127(
 ) -> Dict[str, np.ndarray]:
     ref_pos, ref_ids = _load_hdf5_particles(ic_ref, max_files=max_files)
 
-    map_ref = {int(pid): i for i, pid in enumerate(ref_ids.tolist())}
-    sel_rec: List[int] = []
-    sel_ref: List[int] = []
-    for i, pid in enumerate(recon_ids.tolist()):
-        j = map_ref.get(int(pid))
-        if j is not None:
-            sel_rec.append(i)
-            sel_ref.append(j)
-
-    if not sel_rec:
+    sel_rec, sel_ref = _match_particle_ids(recon_ids, ref_ids)
+    if sel_rec.size == 0:
         return {
             "k_h_mpc": np.array([], dtype=np.float64),
             "pk_ratio": np.array([], dtype=np.float64),
@@ -886,8 +883,8 @@ def compare_power_spectrum_z127(
             "pk_ref": np.array([], dtype=np.float64),
         }
 
-    rec = recon_positions[np.asarray(sel_rec, dtype=np.int64)]
-    ref = ref_pos[np.asarray(sel_ref, dtype=np.int64)]
+    rec = recon_positions[sel_rec]
+    ref = ref_pos[sel_ref]
 
     delta_rec = _paint_cic_density(rec, box=box, grid=grid)
     delta_ref = _paint_cic_density(ref, box=box, grid=grid)
