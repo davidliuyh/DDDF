@@ -1,0 +1,187 @@
+EXEC   = 2LPTic
+
+OBJS   = main.o power.o allvars.o save.o read_param.o  read_glass.o  \
+         npz_writer.o nrsrc/nrutil.o nrsrc/qromb.o nrsrc/polint.o nrsrc/trapzd.o
+
+INCL   = allvars.h proto.h  nrsrc/nrutil.h  Makefile
+
+
+
+#OPT   +=  -DPRODUCEGAS   # Set this to automatically produce gas particles 
+                         # for a single DM species in the input file by interleaved by a half a grid spacing
+
+
+#OPT   +=  -DMULTICOMPONENTGLASSFILE  # set this if the initial glass file contains multiple components
+
+#OPT   +=  -DDIFFERENT_TRANSFER_FUNC  # set this if you want to implement a transfer function that depends on
+                                     # particle type
+
+OPT   +=  -DNO64BITID    # switch this on if you want normal 32-bit IDs
+#OPT   +=  -DCORRECT_CIC  # only switch this on if particles start from a glass (as opposed to grid)
+
+#OPT += -DONLY_ZA # swith this on if you want ZA initial conditions (2LPT otherwise)
+
+
+
+OPTIONS =  $(OPT)
+
+#SYSTYPE="hpcf"
+#SYSTYPE="cosmos"
+#SYSTYPE="som"
+#SYSTYPE="odyssey"
+#SYSTYPE="Paco"
+#SYSTYPE="zefiro"
+#SYSTYPE="flatiron"
+#SYSTYPE="GordonS"
+SYSTYPE="LOCAL"
+
+
+FFTW_INCL = -I/home/rs123/local/include
+FFTW_LIBS = -L/home/rs123/local/lib
+
+GSL_LIBS=   -L/usr/local/gsl/1.9/lib/
+GSL_INCL =  -I/usr/local/gsl/1.9/include/
+
+
+CC       =  /usr/mpi/gcc/openmpi-1.2.2-1/bin/mpicc
+MPICHLIB = -L/usr/mpi/gcc/openmpi-1.2.2-1/lib64 -lmpi
+
+OPTIMIZE =   -O3 -Wall    # optimization and warning flags (default)
+
+
+ifeq ($(SYSTYPE),"flatiron")
+CC       =   mpicc     # sets the C-compiler   
+OPT      +=  -DMPICH_IGNORE_CXX_SEEK
+OPTIMIZE =   -std=gnu99 -O3 -g -Wall -Wno-unused-but-set-variable -Wno-uninitialized -Wno-unknown-pragmas -Wno-unused-function -march=native
+GSL_INCL =
+GSL_LIBS =
+FFTW_INCL=
+FFTW_LIBS=
+MPICHLIB =  -lmpi
+HDF5INCL =  -DH5_USE_16_API
+HDF5LIB  =  -lhdf5 -lz
+ifeq (NUM_THREADS,$(findstring NUM_THREADS,$(CONFIGVARS)))
+PTIMIZE +=  -fopenmp
+OPT      += -DIMPOSE_PINNING -DSOCKETS=4 -DMAX_CORES=16
+endif
+endif
+
+ifeq ($(SYSTYPE),"GordonS")
+CC = mpicc -g -O2 #-xW -ipo -Wall
+CXX = mpiCC -g -O2 -xW -ipo -Wall
+OPTIMIZE =
+GMP_INCL = -I/opt/gnu/gmp/include
+GMP_LIBS = -L/opt/gnu/gmp/lib
+GSL_INCL = -I/opt/gsl/2.1/intel/include
+GSL_LIBS = -L/opt/gsl/2.1/intel/lib
+FFTW_INCL= -I/opt/fftw/2.1.5/intel/mvapich2_ib/include
+FFTW_LIBS= -L/opt/fftw/2.1.5/intel/mvapich2_ib/lib
+HDF5INCL = -I/opt/hdf5/intel/mvapich2_ib/include
+HDF5LIB = -L/opt/hdf5/intel/mvapich2_ib/lib -lhdf5 -lz
+endif
+
+ifeq ($(SYSTYPE),"LOCAL")
+CC       = mpicc
+OPTIMIZE = -O3 -g -Wall
+GSL_INCL =
+GSL_LIBS =
+FFTW_INCL= -I../local/fftw2/include
+FFTW_LIBS= -L../local/fftw2/lib
+MPICHLIB =
+endif
+
+ifeq ($(SYSTYPE),"Paco")
+CC       =  gcc     # sets the C-compiler
+OPT      +=  
+OPTIMIZE =   -O3 -g 
+GSL_INCL = -I/home/villa/software/gsl/include
+GSL_LIBS = -L/home/villa/software/gsl/lib
+FFTW_INCL= -I/home/villa/software/fftw_2.1.5/include
+FFTW_LIBS= -L/home/villa/software/fftw_2.1.5/lib
+MPICHLIB = -L/home/villa/software/openMPI/lib -lmpi
+MPI_INCL = -I/home/villa/software/openMPI/include
+endif
+
+ifeq ($(SYSTYPE),"zefiro")
+CC       =  mpicc     # sets the C-compiler
+OPT      +=  
+OPTIMIZE =  -O3 -g
+GSL_INCL = -I/home/users/villaes/Libraries/GSL/gsl-1.16_lib/include 
+GSL_LIBS = -L/home/users/villaes/Libraries/GSL/gsl-1.16_lib/lib
+FFTW_INCL= -I/home/users/villaes/Libraries/FFTW/fftw-2.1.5_lib/include
+FFTW_LIBS= -L/home/users/villaes/Libraries/FFTW/fftw-2.1.5_lib/lib
+MPICHLIB = -L/usr/lib64/openmpi/include -lmpi
+MPI_INCL = -I/usr/lib64/openmpi/lib
+endif
+
+ifeq ($(SYSTYPE),"odyssey")
+CC       =  mpicc     # sets the C-compiler
+OPT      +=  #-DNOCALLSOFSYSTEM  -DMPICH_IGNORE_CXX_SEEK
+OPTIMIZE =   -O3 -g #-m64 -vec_report0 -xhost
+GSL_INCL =
+GSL_LIBS =
+FFTW_INCL=
+FFTW_LIBS=
+MPICHLIB =
+HDF5INCL = #-DH5_USE_16_API
+HDF5LIB  = #-lhdf5
+endif
+
+ifeq ($(SYSTYPE),"cosmos")
+CC       =  icc
+OPTIMIZE =  
+GSL_INCL =
+GSL_LIBS =  
+FFTW_INCL= 
+FFTW_LIBS= 
+MPICHLIB = -lmpi
+endif
+
+ifeq ($(SYSTYPE),"som")
+CC       =  icc
+OPTIMIZE =  -g -O2
+MPI_INCL = -I/software/openmpi-1.6.2/intel/include
+GSL_INCL =
+GSL_LIBS =  
+FFTW_INCL= -I/software/fftw-2.1.5/intel/include
+FFTW_LIBS= -L/software/fftw-2.1.5/intel/lib
+MPICHLIB = -L/software/openmpi-1.6.2/intel/lib -lmpi
+endif
+
+
+ifeq ($(SYSTYPE),"hpcf")
+CC       =   mpicc  # sets the C-compiler
+#OPT     +=  -DFIX_PATHSCALE_MPI_STATUS_IGNORE_BUG 
+OPTIMIZE =  -O3 -xHOST -ip -ipo
+GSL_INCL = -I/usr/local/Cluster-Apps/gsl/1.9/include/
+GSL_LIBS = -L/usr/local/Cluster-Apps/gsl/1.9/lib/
+FFTW_INCL= -I/usr/local/Cluster-Apps.sandybridge/fftw/intel/2.1.5/double/include/
+FFTW_LIBS= -L/usr/local/Cluster-Apps.sandybridge/fftw/intel/2.1.5/double/lib/
+#GSL_INCL = -I/usr/local/Cluster-Users/mv249/GSL/include/
+#GSL_LIBS = -L/usr/local/Cluster-Users/mv249/GSL/lib/
+#FFTW_INCL= -I/usr/local/Cluster-Users/mv249/FFTW/include
+#FFTW_LIBS= -L/usr/local/Cluster-Users/mv249/FFTW/lib -Wl,--rpath -Wl,/usr/local/Cluster-Users/mv249/FFTW/lib/
+endif
+
+
+
+
+
+FFTW_LIB =  $(FFTW_LIBS) -ldrfftw_mpi -ldfftw_mpi -ldrfftw -ldfftw
+
+LIBS   =   -lm  $(MPICHLIB)  $(FFTW_LIB)  $(GSL_LIBS)  -lgsl -lgslcblas
+
+CFLAGS =   $(OPTIONS)  $(OPTIMIZE)  $(FFTW_INCL) $(GSL_INCL) $(MPI_INCL)
+
+$(EXEC): $(OBJS) 
+	$(CC) $(OPTIMIZE) $(OBJS) $(LIBS) $(MPICHLIB)  -o  $(EXEC)  
+
+$(OBJS): $(INCL) 
+
+
+.PHONY : clean
+clean:
+	rm -f $(OBJS) $(EXEC)
+
+
+

@@ -1,0 +1,95 @@
+This code can be used to generate the IC for N-body simulations using 2LPT.
+We have downloaded the code from Roman Scoccimarro web page and performed
+a few changes to use in the standard way we do.
+
+The first modifications are these:
+
+1) We have left
+  
+  Dplus = GrowthFactor(InitTime, 1.0);
+  
+in power.c instead of setting:
+
+   Dplus = 1.0;
+
+In this way we need to input the z=0 P(k) and set sigma8 to its value at z=0.
+The code will compute the growth factor at the starting redshift and change
+the amplitude by itself.
+
+
+
+2) It seems that the code is designed to read a file containing 
+
+log10(k), log10(delta2). Therefore, we have modified in power.c:
+
+  PowerTable[NPowerTable].logk = k;
+  PowerTable[NPowerTable].logD = p;
+
+by
+
+  PowerTable[NPowerTable].logk = log10(k);
+  PowerTable[NPowerTable].logD = log10(p * 4 * M_PI * k * k * k);
+
+
+
+3) From the way it computes the value of sigma_8 (see function sigma2_int
+in power.c) there are some extra factors. To correct for this we have added
+to power.c in line 235
+
+   P = P / (8.0 * M_PI * M_PI * M_PI); //Normalized factor
+
+
+4) We have modified the routines
+
+-allvars.h
+-allvars.c
+-read_param.c
+-main.c
+
+to allow the user switching on/off the Rayleigh sampling of the modes
+
+
+5) We have modified the routines
+
+-allvars.h
+-allvars.c
+-read_param.c
+-main.c
+-npz_writer.c
+
+to support white-noise export/input workflow with three optional parameters
+in the parameter file:
+
+  UseWhiteNoiseInput
+  ExportWhiteNoiseOnly
+  WhiteNoiseFile
+
+Behavior:
+
+- UseWhiteNoiseInput = 0
+  Generate random white noise from Seed (and RayleighSampling), and write
+  white_noise.npz to OutputDir.
+
+- UseWhiteNoiseInput = 1
+  Read white noise from WhiteNoiseFile. If WhiteNoiseFile is not set, the
+  default is OutputDir/white_noise.npz.
+
+- ExportWhiteNoiseOnly = 1
+  Export white_noise.npz and exit before IC generation.
+
+Important constraint:
+
+- ExportWhiteNoiseOnly = 1 requires UseWhiteNoiseInput = 0.
+
+Typical usage examples:
+
+A) Export white noise only
+
+  UseWhiteNoiseInput   0
+  ExportWhiteNoiseOnly 1
+
+B) Reuse existing white noise to generate ICs
+
+  UseWhiteNoiseInput   1
+  ExportWhiteNoiseOnly 0
+  WhiteNoiseFile       /path/to/white_noise.npz
