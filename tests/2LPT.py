@@ -269,7 +269,7 @@ def save_psi1_and_qinit_for_seed(
     glass_pos, glass_box = _load_glass_positions(paths.glass_file)
     q_init = _tile_glass_to_box(glass_pos, glass_box, nsample=nsample_use, box=cfg["box"])
 
-    psi1_file = paths.wn_dir / f"psi1_grid_z0_{output_tag}_n{nsample_use}.npz"
+    psi1_file = paths.wn_dir / f"psi1_grid_z127_{output_tag}_n{nsample_use}.npz"
     qinit_file = paths.wn_dir / f"q_init_{output_tag}_n{nsample_use}.npz"
 
     np.savez_compressed(
