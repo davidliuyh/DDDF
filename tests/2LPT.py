@@ -1,78 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import h5py
 import numpy as np
 import readgadget
 
-try:
-    import scipy.fft as _spfft  # type: ignore
-except Exception:
-    _spfft = None
-
-try:
-    import pyfftw.interfaces.numpy_fft as _fftw_fft  # type: ignore
-    import pyfftw.interfaces.cache as _fftw_cache  # type: ignore
-
-    _fftw_cache.enable()
-except Exception:
-    _fftw_fft = None
-
-
-def _resolve_fft_threads() -> int:
-    raw = os.environ.get("DDDF_FFT_THREADS", "").strip()
-    if raw:
-        try:
-            n = int(raw)
-            return max(1, n)
-        except ValueError:
-            pass
-    return max(1, os.cpu_count() or 1)
-
-
-FFT_THREADS = _resolve_fft_threads()
-
-
-def _fftn(a: np.ndarray) -> np.ndarray:
-    if _spfft is not None:
-        return _spfft.fftn(a, workers=FFT_THREADS)
-    if _fftw_fft is not None:
-        return _fftw_fft.fftn(a, threads=FFT_THREADS)
-    return np.fft.fftn(a)
-
-
-def _ifftn(a: np.ndarray) -> np.ndarray:
-    if _spfft is not None:
-        return _spfft.ifftn(a, workers=FFT_THREADS)
-    if _fftw_fft is not None:
-        return _fftw_fft.ifftn(a, threads=FFT_THREADS)
-    return np.fft.ifftn(a)
-
-
-def _rfftn(a: np.ndarray) -> np.ndarray:
-    if _spfft is not None:
-        return _spfft.rfftn(a, workers=FFT_THREADS)
-    if _fftw_fft is not None:
-        return _fftw_fft.rfftn(a, threads=FFT_THREADS)
-    return np.fft.rfftn(a)
-
-
-def _irfftn(a: np.ndarray, s: Tuple[int, int, int]) -> np.ndarray:
-    if _spfft is not None:
-        return _spfft.irfftn(a, s=s, workers=FFT_THREADS)
-    if _fftw_fft is not None:
-        return _fftw_fft.irfftn(a, s=s, threads=FFT_THREADS)
-    return np.fft.irfftn(a, s=s)
-
 
 @dataclass
 class SeedPaths:
     preferred_root: Path
-    wn_root: Path
     wn_dir: Path
     white_noise_file: Path
     param_file: Path
@@ -80,31 +19,6 @@ class SeedPaths:
     pk_file: Path
     ic_ref: Path
     snapshot_z0: Path
-
-
-@dataclass
-class ParamConfig:
-    nmesh: int
-    nsample: int
-    box: float
-    glass_tile_fac: int
-    omega_m: float
-    omega_l: float
-    redshift: float
-    init_time: float
-    sigma8: float
-
-
-@dataclass
-class UnitAudit:
-    position_unit: str
-    box_size_raw: float
-    box_size_mpc_h: float
-    box_size_kpc_h: float
-    camb_k_unit: str
-    camb_p_unit: str
-    internal_k_unit: str
-    internal_p_unit: str
 
 
 def _strip_comment(line: str) -> str:
@@ -121,77 +35,55 @@ def parse_param_file(path: Path) -> Dict[str, str]:
             if not line:
                 continue
             parts = line.split()
-            if len(parts) < 2:
-                continue
-            key = parts[0]
-            values[key] = parts[1]
+            if len(parts) >= 2:
+                values[parts[0]] = parts[1]
     return values
 
 
-def load_param_config(path: Path) -> ParamConfig:
+def load_param_config(path: Path) -> Dict[str, float]:
     p = parse_param_file(path)
-
-    def _f(key: str, default: Optional[float] = None) -> float:
-        if key in p:
-            return float(p[key])
-        if default is None:
-            raise KeyError(f"Missing key {key} in {path}")
-        return float(default)
-
-    return ParamConfig(
-        nmesh=int(_f("Nmesh")),
-        nsample=int(_f("Nsample")),
-        box=_f("Box"),
-        glass_tile_fac=int(_f("GlassTileFac")),
-        omega_m=_f("Omega"),
-        omega_l=_f("OmegaLambda"),
-        redshift=_f("Redshift"),
-        init_time=_f("InitTime", 1.0 / (1.0 + _f("Redshift"))),
-        sigma8=_f("Sigma8", 0.834),
-    )
+    redshift = float(p.get("Redshift", "99"))
+    return {
+        "nmesh": float(p["Nmesh"]),
+        "nsample": float(p["Nsample"]),
+        "box": float(p["Box"]),
+        "omega_m": float(p["Omega"]),
+        "omega_l": float(p["OmegaLambda"]),
+        "sigma8": float(p.get("Sigma8", "0.834")),
+        "init_time": float(p.get("InitTime", 1.0 / (1.0 + redshift))),
+    }
 
 
-def discover_seed_paths(
-    preferred_root: Path = Path("/pscratch/sd/l/liuyh15/Quijote/fiducial_LR/0"),
-    fallback_root: Path = Path("/pscratch/sd/l/liuyh15/Quijote/fiducial/0"),
-) -> SeedPaths:
-    roots = [preferred_root, fallback_root]
+def discover_seed_paths(preferred_root: Path, fallback_root: Optional[Path] = None) -> SeedPaths:
+    root = preferred_root
+    wn_dir = root / "wn"
 
-    wn_root = next((r for r in roots if (r / "wn" / "white_noise.npz").exists()), None)
-    if wn_root is None:
-        raise FileNotFoundError("Cannot locate white_noise.npz under fiducial_LR/0 or fiducial/0")
+    white_noise_file = wn_dir / "white_noise.npz"
+    if not white_noise_file.exists() and fallback_root is not None:
+        cand = fallback_root / "wn" / "white_noise.npz"
+        if cand.exists():
+            root = fallback_root
+            wn_dir = root / "wn"
+            white_noise_file = cand
 
-    wn_dir = wn_root / "wn"
-    param_candidates = [wn_dir / "2LPT_wn_rund256.param", wn_dir / "2LPT_wn.param"]
-    param_file = next((p for p in param_candidates if p.exists()), None)
-    if param_file is None:
-        raise FileNotFoundError(f"Cannot locate 2LPT_wn*.param in {wn_dir}")
+    if (wn_dir / "2LPT_wn.param").exists():
+        param_file = wn_dir / "2LPT_wn.param"
+    elif (wn_dir / "2LPT_wn_rund256.param").exists():
+        param_file = wn_dir / "2LPT_wn_rund256.param"
+    else:
+        param_file = root / "ICs" / "2LPT.param"
 
     raw = parse_param_file(param_file)
     glass_file = Path(raw["GlassFile"]).expanduser()
     pk_file = Path(raw["FileWithInputSpectrum"]).expanduser()
 
-    ic_ref_file = wn_dir / "ics_seed000_rund_n256.hdf5"
-    if ic_ref_file.exists():
-        ic_ref: Path = ic_ref_file
-    elif (preferred_root / "ICs").exists():
-        ic_ref = preferred_root / "ICs"
-    elif (wn_root / "ICs").exists():
-        ic_ref = wn_root / "ICs"
-    else:
-        raise FileNotFoundError("Cannot locate z=127 reference IC output")
-
-    snapshot_z0 = preferred_root / "snapdir_004"
-    if not snapshot_z0.exists():
-        snapshot_z0 = wn_root / "snapdir_004"
-    if not snapshot_z0.exists():
-        raise FileNotFoundError("Cannot locate z=0 snapshot directory snapdir_004")
+    ic_ref = root / "ICs"
+    snapshot_z0 = root / "snapdir_004"
 
     return SeedPaths(
-        preferred_root=preferred_root,
-        wn_root=wn_root,
+        preferred_root=root,
         wn_dir=wn_dir,
-        white_noise_file=wn_dir / "white_noise.npz",
+        white_noise_file=white_noise_file,
         param_file=param_file,
         glass_file=glass_file,
         pk_file=pk_file,
@@ -208,19 +100,8 @@ def _growth_factor(a: float, omega_m: float, omega_l: float) -> float:
     return 2.5 * omega_m * np.sqrt(omega_m / a**3 + omega_l) * integral
 
 
-def growth_ratio(a_target: float, a_ref: float, omega_m: float, omega_l: float) -> float:
-    return _growth_factor(a_target, omega_m, omega_l) / _growth_factor(a_ref, omega_m, omega_l)
-
-
 def _read_power_table(pk_file: Path) -> Tuple[np.ndarray, np.ndarray]:
-    """Read CAMB P(k) table, return (log10_k_hmpc, log10_Delta2).
-
-    Matches C read_power_table: stores log10(k) in h/Mpc and
-    log10(4 pi k^3 P(k)) for later interpolation.
-    """
     data = np.loadtxt(pk_file)
-    if data.ndim != 2 or data.shape[1] < 2:
-        raise ValueError(f"Invalid power spectrum table: {pk_file}")
     k_h_mpc = data[:, 0].astype(np.float64)
     p_mpc3_h3 = data[:, 1].astype(np.float64)
     log10_k = np.log10(k_h_mpc)
@@ -229,103 +110,50 @@ def _read_power_table(pk_file: Path) -> Tuple[np.ndarray, np.ndarray]:
     return log10_k[order], log10_delta2[order]
 
 
-def _sigma8_norm(log10_k_tab: np.ndarray, log10_d2_tab: np.ndarray,
-                 sigma8: float, unit_length_cm: float = 3.085678e21,
-                 input_spectrum_unit_cm: float = 3.085678e24) -> float:
-    """Compute Norm so that sigma(R=8 Mpc/h) = sigma8.
-
-    Matches C initialize_powerspectrum + TopHatSigma2.
-    """
-    # R8 in internal units (kpc/h)
-    R8 = 8.0 * (input_spectrum_unit_cm / unit_length_cm)  # 8 Mpc/h -> kpc/h
-
-    # Integrate sigma^2(R8) with Norm=1.
-    k_max = 500.0 / R8
-    nk = 100000
-    k_arr = np.linspace(1e-8, k_max, nk)
-    # PowerSpec with Norm=1 in internal units
-    p_arr = _power_spec_tabulated(k_arr, log10_k_tab, log10_d2_tab, 1.0,
-                                   unit_length_cm, input_spectrum_unit_cm)
-    kr = k_arr * R8
-    kr2 = kr * kr
-    kr3 = kr2 * kr
-    w = np.where(kr > 1e-8, 3.0 * (np.sin(kr) / kr3 - np.cos(kr) / kr2), 0.0)
-    integrand = 4.0 * np.pi * k_arr**2 * w**2 * p_arr
-    sigma2 = np.trapz(integrand, k_arr)
-    return sigma8**2 / sigma2
-
-
-def _power_spec_tabulated(k_internal: np.ndarray,
-                          log10_k_tab: np.ndarray,
-                          log10_d2_tab: np.ndarray,
-                          norm: float,
-                          unit_length_cm: float = 3.085678e21,
-                          input_spectrum_unit_cm: float = 3.085678e24,
-                          ) -> np.ndarray:
-    """Evaluate P(k) matching C PowerSpec_Tabulated.
-
-    k_internal is in internal units (h/kpc).
-    Returns P(k) in internal units (kpc/h)^3.
-    """
-    # convert k from internal (h/kpc) to h/Mpc for table lookup
+def _power_spec_tabulated(
+    k_internal: np.ndarray,
+    log10_k_tab: np.ndarray,
+    log10_d2_tab: np.ndarray,
+    norm: float,
+    unit_length_cm: float = 3.085678e21,
+    input_spectrum_unit_cm: float = 3.085678e24,
+) -> np.ndarray:
     k_hmpc = k_internal * (input_spectrum_unit_cm / unit_length_cm)
     logk = np.log10(np.maximum(k_hmpc, 1e-30))
-
     in_range = (logk >= log10_k_tab[0]) & (logk <= log10_k_tab[-1])
-    log_delta2 = np.where(
-        in_range,
-        np.interp(logk, log10_k_tab, log10_d2_tab),
-        -300.0,
-    )
+
+    log_delta2 = np.where(in_range, np.interp(logk, log10_k_tab, log10_d2_tab), -300.0)
     delta2 = np.power(10.0, log_delta2)
 
-    # P = Norm * Delta2 / (4*pi*k^3) / (8*pi^3)  -- k in *internal* units
     k_safe = np.maximum(k_internal, 1e-30)
-    P = np.where(
+    return np.where(
         in_range & (k_internal > 0),
         norm * delta2 / (4.0 * np.pi * k_safe**3) / (8.0 * np.pi**3),
         0.0,
     )
-    return P
 
 
-def audit_units(param_file: Path) -> UnitAudit:
-    cfg = load_param_config(param_file)
-    # Box in Quijote params is typically in kpc/h (e.g. 1e6 for 1 Gpc/h).
-    box_kpc_h = float(cfg.box)
-    box_mpc_h = box_kpc_h / 1000.0
-    return UnitAudit(
-        position_unit="kpc/h",
-        box_size_raw=box_kpc_h,
-        box_size_mpc_h=box_mpc_h,
-        box_size_kpc_h=box_kpc_h,
-        camb_k_unit="h/Mpc",
-        camb_p_unit="(Mpc/h)^3",
-        internal_k_unit="h/kpc",
-        internal_p_unit="(kpc/h)^3",
-    )
+def _sigma8_norm(log10_k_tab: np.ndarray, log10_d2_tab: np.ndarray, sigma8: float) -> float:
+    unit_length_cm = 3.085678e21
+    input_spectrum_unit_cm = 3.085678e24
+    r8 = 8.0 * (input_spectrum_unit_cm / unit_length_cm)
 
+    k_max = 500.0 / r8
+    k_arr = np.linspace(1e-8, k_max, 100000)
+    p_arr = _power_spec_tabulated(k_arr, log10_k_tab, log10_d2_tab, 1.0)
 
-def _interp_pk_log(k: np.ndarray, k_tab: np.ndarray, p_tab: np.ndarray) -> np.ndarray:
-    """Legacy log-log interpolation (unused in fixed pipeline)."""
-    out = np.zeros_like(k, dtype=np.float64)
-    m = k > 0
-    if np.any(m):
-        out[m] = np.exp(
-            np.interp(np.log(k[m]), np.log(k_tab), np.log(p_tab), left=np.log(p_tab[0]), right=np.log(p_tab[-1]))
-        )
-    return out
+    kr = k_arr * r8
+    kr2 = kr * kr
+    kr3 = kr2 * kr
+    w = np.where(kr > 1e-8, 3.0 * (np.sin(kr) / kr3 - np.cos(kr) / kr2), 0.0)
+    sigma2 = np.trapz(4.0 * np.pi * k_arr**2 * w**2 * p_arr, k_arr)
+    return sigma8**2 / sigma2
 
 
 def _crop_rfft_cube(arr: np.ndarray, n_out: int) -> np.ndarray:
     n_in = arr.shape[0]
-    if n_out > n_in:
-        raise ValueError(f"n_out={n_out} cannot exceed n_in={n_in}")
     if n_out == n_in:
         return arr.copy()
-
-    if n_out % 2 != 0:
-        raise ValueError("n_out must be even for symmetric crop")
 
     hi = n_out // 2
     out = np.zeros((n_out, n_out, n_out // 2 + 1), dtype=arr.dtype)
@@ -352,102 +180,64 @@ def _build_psi1_from_white_noise(
     norm: float,
     dplus: float,
     nsample: int,
-    sphere_mode: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build ZA displacement field from white noise, matching C 2LPTic.
-
-    Returns psi1 at z=init (i.e. divided by Dplus, matching C convention).
-    The output is the displacement field that can be used directly.
-    """
-    n = white_noise_k.shape[0]  # this is Nmesh
+    n = white_noise_k.shape[0]
     kx, ky, kz = _kgrid(box, n)
     k2 = kx * kx + ky * ky + kz * kz
     kval = np.sqrt(k2)
 
-    # P(k) in internal units, with sigma8 normalization
     pk = _power_spec_tabulated(kval.ravel(), log10_k_tab, log10_d2_tab, norm).reshape(kval.shape)
-
-    # C amplitude: fac = (2*pi/Box)^{3/2}, delta = fac * sqrt(P(k)) / Dplus
     fac = (2.0 * np.pi / box) ** 1.5
     delta = fac * np.sqrt(np.maximum(pk, 0.0)) / dplus
 
-    # Nsample cutoff: match C's cube-mode k-space truncation
-    k_nyq = nsample / 2  # in units of 2π/Box
-    if sphere_mode:
-        mask_ns = (kval * box / (2.0 * np.pi)) <= k_nyq
-    else:
-        mask_ns = (
-            (np.abs(kx) * box / (2.0 * np.pi) <= k_nyq)
-            & (np.abs(ky) * box / (2.0 * np.pi) <= k_nyq)
-            & (np.abs(kz) * box / (2.0 * np.pi) <= k_nyq)
-        )
-    # Also skip Nyquist planes and DC
+    k_nyq = nsample / 2
+    mask_ns = (
+        (np.abs(kx) * box / (2.0 * np.pi) <= k_nyq)
+        & (np.abs(ky) * box / (2.0 * np.pi) <= k_nyq)
+        & (np.abs(kz) * box / (2.0 * np.pi) <= k_nyq)
+    )
+
     ikx = np.fft.fftfreq(n, d=1.0 / n).astype(int)
     ikz = np.fft.rfftfreq(n, d=1.0 / n).astype(int)
-    IKX, IKY, IKZ = np.meshgrid(ikx, ikx, ikz, indexing="ij")
-    nyquist_mask = (IKX == n // 2) | (IKY == n // 2) | (IKZ == n // 2)
-    dc_mask = (IKX == 0) & (IKY == 0) & (IKZ == 0)
-    valid = mask_ns & ~nyquist_mask & ~dc_mask & (k2 > 0)
+    ikx3, iky3, ikz3 = np.meshgrid(ikx, ikx, ikz, indexing="ij")
+    valid = mask_ns & (k2 > 0)
+    valid &= (ikx3 != n // 2) & (iky3 != n // 2) & (ikz3 != n // 2)
+    valid &= ~((ikx3 == 0) & (iky3 == 0) & (ikz3 == 0))
 
-    # Build displacement in k-space: cdisp[axes] = i * kvec/k² * delta * wn
-    # (matches C sign convention for ZA displacement)
-    # The white noise wn = re + i*im, and C computes:
-    #   cdisp.re = -kvec/k² * delta * im
-    #   cdisp.im =  kvec/k² * delta * re
-    # which equals i * kvec/k² * delta * wn
     cdisp = [None, None, None]
-    kvecs = [kx, ky, kz]
-    for axes in range(3):
+    for ax, kv in enumerate((kx, ky, kz)):
         cd = np.zeros_like(white_noise_k, dtype=np.complex128)
-        cd[valid] = 1j * kvecs[axes][valid] / k2[valid] * delta[valid] * white_noise_k[valid]
-        cdisp[axes] = cd
+        cd[valid] = 1j * kv[valid] / k2[valid] * delta[valid] * white_noise_k[valid]
+        cdisp[ax] = cd
 
-    # FFTW inverse does NOT divide by N³, but numpy irfftn does.
-    # Multiply by N³ to match C convention.
-    nmesh3 = float(n * n * n)
-    psi1_x = (_irfftn(cdisp[0], s=(n, n, n)).real * nmesh3).astype(np.float32)
-    psi1_y = (_irfftn(cdisp[1], s=(n, n, n)).real * nmesh3).astype(np.float32)
-    psi1_z = (_irfftn(cdisp[2], s=(n, n, n)).real * nmesh3).astype(np.float32)
+    n3 = float(n * n * n)
+    psi1_x = (np.fft.irfftn(cdisp[0], s=(n, n, n)).real * n3).astype(np.float32)
+    psi1_y = (np.fft.irfftn(cdisp[1], s=(n, n, n)).real * n3).astype(np.float32)
+    psi1_z = (np.fft.irfftn(cdisp[2], s=(n, n, n)).real * n3).astype(np.float32)
     return psi1_x, psi1_y, psi1_z
 
 
 def _load_glass_positions(glass_file: Path) -> Tuple[np.ndarray, float]:
     header = readgadget.header(str(glass_file))
-    nall = np.asarray(header.nall)
-    ptype = int(np.argmax(nall))
-    if nall[ptype] <= 0:
-        raise ValueError(f"No particles found in glass file {glass_file}")
+    ptype = int(np.argmax(np.asarray(header.nall)))
     pos = readgadget.read_block(str(glass_file), "POS ", [ptype], verbose=False)
     return np.asarray(pos, dtype=np.float32), float(header.boxsize)
 
 
 def _tile_glass_to_box(glass_pos: np.ndarray, glass_box: float, nsample: int, box: float) -> np.ndarray:
     n_glass = int(round(glass_pos.shape[0] ** (1.0 / 3.0)))
-    if n_glass**3 != glass_pos.shape[0]:
-        raise ValueError("Glass particle count is not a perfect cube")
-    if nsample % n_glass != 0:
-        raise ValueError(f"nsample={nsample} is not divisible by glass resolution {n_glass}")
-
     tile = nsample // n_glass
-    shifted: List[np.ndarray] = []
+
+    shifted = []
     for ix in range(tile):
         for iy in range(tile):
             for iz in range(tile):
                 shift = np.array([ix, iy, iz], dtype=np.float32) * np.float32(glass_box)
                 shifted.append(glass_pos + shift)
+
     tiled = np.concatenate(shifted, axis=0)
-
     scale = box / (glass_box * tile)
-    q = tiled * np.float32(scale)
-    return np.mod(q, np.float32(box)).astype(np.float32)
-
-
-def _hash_array(arr: np.ndarray) -> str:
-    import hashlib
-
-    h = hashlib.sha256()
-    h.update(np.ascontiguousarray(arr).view(np.uint8))
-    return h.hexdigest()
+    return np.mod(tiled * np.float32(scale), np.float32(box)).astype(np.float32)
 
 
 def save_psi1_and_qinit_for_seed(
@@ -456,46 +246,19 @@ def save_psi1_and_qinit_for_seed(
     output_tag: str = "seed",
 ) -> Tuple[Path, Path]:
     cfg = load_param_config(paths.param_file)
+    nsample_use = int(cfg["nsample"] if force_nmesh is None else force_nmesh)
 
     wn = np.load(paths.white_noise_file)
     wn_k = wn["white_noise"]
-    n_in = int(np.asarray(wn["nmesh"]).ravel()[0])
-    wn_nsample = int(np.asarray(wn["nsample"]).ravel()[0])
-
-    if force_nmesh is not None:
-        if int(force_nmesh) != cfg.nsample:
-            raise ValueError(
-                f"force_nmesh={force_nmesh} is outside param-allowed Nsample={cfg.nsample}. "
-                "Custom downsampling is disabled."
-            )
-
-    # Match C: k-space truncation at Nsample/2.
-    # C runs FFT on Nmesh grid; for memory, we crop white noise to Nsample
-    # and run FFT on the smaller grid. The Nsample cutoff in
-    # _build_psi1_from_white_noise ensures identical k-mode content.
-    if cfg.nmesh != n_in:
-        raise ValueError(f"Param Nmesh={cfg.nmesh} but white_noise nmesh={n_in}; refusing implicit resampling")
-
-    nsample_use = cfg.nsample
-    nmesh_use = cfg.nsample  # FFT grid = Nsample for memory efficiency
-
-    # Crop white noise from Nmesh to Nsample in k-space
     wn_k_use = _crop_rfft_cube(wn_k, nsample_use)
 
-    # Read power spectrum table (C convention)
     log10_k_tab, log10_d2_tab = _read_power_table(paths.pk_file)
-
-    # Compute Dplus = GrowthFactor(InitTime, 1.0) = growth(1.0)/growth(InitTime)
-    # matching C convention: Dplus >> 1, used as divisor in amplitude
-    dplus = _growth_factor(1.0, cfg.omega_m, cfg.omega_l) / _growth_factor(cfg.init_time, cfg.omega_m, cfg.omega_l)
-
-    # Sigma8 normalization matching C
-    norm = _sigma8_norm(log10_k_tab, log10_d2_tab, cfg.sigma8)
-    print(f"[psi1] Norm={norm:.6g}, Dplus={dplus:.6g}, Nmesh={cfg.nmesh}, Nsample={nsample_use}")
+    dplus = _growth_factor(1.0, cfg["omega_m"], cfg["omega_l"]) / _growth_factor(cfg["init_time"], cfg["omega_m"], cfg["omega_l"])
+    norm = _sigma8_norm(log10_k_tab, log10_d2_tab, cfg["sigma8"])
 
     psi1_x, psi1_y, psi1_z = _build_psi1_from_white_noise(
         wn_k_use,
-        cfg.box,
+        cfg["box"],
         log10_k_tab,
         log10_d2_tab,
         norm=norm,
@@ -504,9 +267,9 @@ def save_psi1_and_qinit_for_seed(
     )
 
     glass_pos, glass_box = _load_glass_positions(paths.glass_file)
-    q_init = _tile_glass_to_box(glass_pos, glass_box, nsample=nsample_use, box=cfg.box)
+    q_init = _tile_glass_to_box(glass_pos, glass_box, nsample=nsample_use, box=cfg["box"])
 
-    psi1_file = paths.wn_dir / f"psi1_grid_z0_{output_tag}_n{nmesh_use}.npz"
+    psi1_file = paths.wn_dir / f"psi1_grid_z0_{output_tag}_n{nsample_use}.npz"
     qinit_file = paths.wn_dir / f"q_init_{output_tag}_n{nsample_use}.npz"
 
     np.savez_compressed(
@@ -514,27 +277,10 @@ def save_psi1_and_qinit_for_seed(
         psi1_x=psi1_x,
         psi1_y=psi1_y,
         psi1_z=psi1_z,
-        box=np.array([cfg.box], dtype=np.float64),
-        nmesh=np.array([nmesh_use], dtype=np.int32),
-        nsample=np.array([nsample_use], dtype=np.int32),
-        omega_m=np.array([cfg.omega_m], dtype=np.float64),
-        omega_l=np.array([cfg.omega_l], dtype=np.float64),
-        init_time=np.array([cfg.init_time], dtype=np.float64),
+        box=np.array([cfg["box"]], dtype=np.float64),
         dplus=np.array([dplus], dtype=np.float64),
-        norm=np.array([norm], dtype=np.float64),
-        source_white_noise=str(paths.white_noise_file),
-        source_param=str(paths.param_file),
     )
-
-    np.savez_compressed(
-        qinit_file,
-        q_init=q_init,
-        box=np.array([cfg.box], dtype=np.float64),
-        nsample=np.array([nsample_use], dtype=np.int32),
-        sha256_q_init=np.array([_hash_array(q_init)]),
-        source_glass=str(paths.glass_file),
-        source_param=str(paths.param_file),
-    )
+    np.savez_compressed(qinit_file, q_init=q_init, box=np.array([cfg["box"]], dtype=np.float64))
 
     return psi1_file, qinit_file
 
@@ -549,8 +295,7 @@ def _derivative(field: np.ndarray, axis: int, box: float) -> np.ndarray:
         phase = (1j * k)[None, :, None]
     else:
         phase = (1j * k)[None, None, :]
-    fk = _fftn(field)
-    return _ifftn(phase * fk).real.astype(np.float32)
+    return np.fft.ifftn(phase * np.fft.fftn(field)).real.astype(np.float32)
 
 
 def _build_psi2_from_psi1(psi1x: np.ndarray, psi1y: np.ndarray, psi1z: np.ndarray, box: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -561,34 +306,23 @@ def _build_psi2_from_psi1(psi1x: np.ndarray, psi1y: np.ndarray, psi1z: np.ndarra
     dxz = _derivative(psi1x, 2, box)
     dyz = _derivative(psi1y, 2, box)
 
-    source = dxx * dyy + dxx * dzz + dyy * dzz - dxy * dxy - dxz * dxz - dyz * dyz
-
-    n = source.shape[0]
+    src = dxx * dyy + dxx * dzz + dyy * dzz - dxy * dxy - dxz * dxz - dyz * dyz
+    n = src.shape[0]
     kx, ky, kz = _kgrid(box, n)
     k2 = kx * kx + ky * ky + kz * kz
 
-    src_k = _rfftn(source)
+    src_k = np.fft.rfftn(src)
     phi2_k = np.zeros_like(src_k, dtype=np.complex128)
     m = k2 > 0
     phi2_k[m] = -src_k[m] / k2[m]
 
-    psi2x_k = (-3.0 / 7.0) * 1j * kx * phi2_k
-    psi2y_k = (-3.0 / 7.0) * 1j * ky * phi2_k
-    psi2z_k = (-3.0 / 7.0) * 1j * kz * phi2_k
-
-    psi2x = _irfftn(psi2x_k, s=(n, n, n)).real.astype(np.float32)
-    psi2y = _irfftn(psi2y_k, s=(n, n, n)).real.astype(np.float32)
-    psi2z = _irfftn(psi2z_k, s=(n, n, n)).real.astype(np.float32)
+    psi2x = np.fft.irfftn((-3.0 / 7.0) * 1j * kx * phi2_k, s=(n, n, n)).real.astype(np.float32)
+    psi2y = np.fft.irfftn((-3.0 / 7.0) * 1j * ky * phi2_k, s=(n, n, n)).real.astype(np.float32)
+    psi2z = np.fft.irfftn((-3.0 / 7.0) * 1j * kz * phi2_k, s=(n, n, n)).real.astype(np.float32)
     return psi2x, psi2y, psi2z
 
 
-def _trilinear_interp_vector(
-    q: np.ndarray,
-    disp_x: np.ndarray,
-    disp_y: np.ndarray,
-    disp_z: np.ndarray,
-    box: float,
-) -> np.ndarray:
+def _trilinear_interp_vector(q: np.ndarray, disp_x: np.ndarray, disp_y: np.ndarray, disp_z: np.ndarray, box: float) -> np.ndarray:
     n = disp_x.shape[0]
     cell = box / n
 
@@ -636,19 +370,8 @@ def _trilinear_interp_vector(
     return out
 
 
-def reconstruct_z127_displacement_only(
-    psi1_file: Path,
-    qinit_file: Path,
-    param_file: Path,
-) -> Dict[str, np.ndarray]:
-    """Reconstruct z=127 positions from stored psi1 and q_init.
-
-    psi1 is stored at z=init scale (matching C convention),
-    so no growth factor rescaling is needed.
-    psi2 is computed from psi1 using the standard 2LPT formula.
-    """
-    cfg = load_param_config(param_file)
-
+def reconstruct_z127_displacement_only(psi1_file: Path, qinit_file: Path, param_file: Path) -> Dict[str, np.ndarray]:
+    _ = param_file
     psi = np.load(psi1_file)
     qd = np.load(qinit_file)
 
@@ -656,50 +379,38 @@ def reconstruct_z127_displacement_only(
     psi1y = psi["psi1_y"].astype(np.float32)
     psi1z = psi["psi1_z"].astype(np.float32)
     q_init = qd["q_init"].astype(np.float32)
-
     box = float(np.asarray(psi["box"]).ravel()[0])
 
-    # psi1 is already at z=init scale, compute 2LPT correction
     psi2x, psi2y, psi2z = _build_psi2_from_psi1(psi1x, psi1y, psi1z, box)
-
-    # Total displacement: psi1 + psi2 (psi2 already includes -3/7 factor)
-    disp_particles = _trilinear_interp_vector(
-        q_init,
-        psi1x + psi2x,
-        psi1y + psi2y,
-        psi1z + psi2z,
-        box,
-    )
-    x_rec = np.mod(q_init + disp_particles, np.float32(box)).astype(np.float32)
-
+    disp = _trilinear_interp_vector(q_init, psi1x + psi2x, psi1y + psi2y, psi1z + psi2z, box)
+    x_rec = np.mod(q_init + disp, np.float32(box)).astype(np.float32)
     ids = np.arange(1, q_init.shape[0] + 1, dtype=np.uint32)
-    return {
-        "q_init": q_init,
-        "disp": disp_particles,
-        "x_rec": x_rec,
-        "ids": ids,
-        "box": np.array([box], dtype=np.float64),
-    }
+
+    return {"x_rec": x_rec, "ids": ids, "box": np.array([box], dtype=np.float64)}
 
 
 def _load_hdf5_particles(path: Path, max_files: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
-    if path.is_file():
-        files = [path]
-    else:
-        files = sorted(path.glob("*.hdf5"))
+    files = [path] if path.is_file() else sorted(path.glob("*.hdf5"))
     if max_files is not None:
         files = files[:max_files]
-    if not files:
-        raise FileNotFoundError(f"No hdf5 files found in {path}")
 
-    pos_all: List[np.ndarray] = []
-    ids_all: List[np.ndarray] = []
+    pos_all = []
+    ids_all = []
     for fp in files:
         with h5py.File(fp, "r") as h5:
             g = "PartType1" if "PartType1" in h5 else "PartType0"
             pos_all.append(h5[f"{g}/Coordinates"][:].astype(np.float32))
             ids_all.append(h5[f"{g}/ParticleIDs"][:].astype(np.uint32))
+
     return np.concatenate(pos_all, axis=0), np.concatenate(ids_all, axis=0)
+
+
+def _match_particle_ids(query_ids: np.ndarray, ref_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    order = np.argsort(ref_ids, kind="mergesort")
+    ref_sorted = ref_ids[order]
+    loc = np.searchsorted(ref_sorted, query_ids, side="left")
+    valid = (loc < ref_sorted.size) & (ref_sorted[np.clip(loc, 0, ref_sorted.size - 1)] == query_ids)
+    return np.nonzero(valid)[0].astype(np.int64), order[loc[valid]].astype(np.int64)
 
 
 def _periodic_delta(a: np.ndarray, b: np.ndarray, box: float) -> np.ndarray:
@@ -709,52 +420,15 @@ def _periodic_delta(a: np.ndarray, b: np.ndarray, box: float) -> np.ndarray:
     return d
 
 
-def _match_particle_ids(query_ids: np.ndarray, ref_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Return matching indices (query_idx, ref_idx) using vectorized ID lookup."""
-    q = np.asarray(query_ids, dtype=np.uint32)
-    r = np.asarray(ref_ids, dtype=np.uint32)
-    if q.size == 0 or r.size == 0:
-        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-
-    order = np.argsort(r, kind="mergesort")
-    r_sorted = r[order]
-    loc = np.searchsorted(r_sorted, q, side="left")
-    valid = loc < r_sorted.size
-    valid &= r_sorted[np.clip(loc, 0, r_sorted.size - 1)] == q
-    if not np.any(valid):
-        return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-
-    sel_query = np.nonzero(valid)[0].astype(np.int64, copy=False)
-    sel_ref = order[loc[valid]].astype(np.int64, copy=False)
-    return sel_query, sel_ref
-
-
-def compare_z127_positions(
-    recon_positions: np.ndarray,
-    recon_ids: np.ndarray,
-    ic_ref: Path,
-    box: float,
-    max_files: Optional[int] = 1,
-) -> Dict[str, float]:
+def compare_z127_positions(recon_positions: np.ndarray, recon_ids: np.ndarray, ic_ref: Path, box: float, max_files: Optional[int] = 1) -> Dict[str, float]:
     ref_pos, ref_ids = _load_hdf5_particles(ic_ref, max_files=max_files)
-
     sel_rec, sel_ref = _match_particle_ids(recon_ids, ref_ids)
-    if sel_rec.size == 0:
-        return {
-            "n_match": 0,
-            "pos_rms": np.nan,
-            "pos_max": np.nan,
-        }
 
-    r = recon_positions[sel_rec]
-    t = ref_pos[sel_ref]
-    d = _periodic_delta(r, t, box)
-
-    rms = float(np.sqrt(np.mean(np.sum(d * d, axis=1))))
+    d = _periodic_delta(recon_positions[sel_rec], ref_pos[sel_ref], box)
     dnorm = np.sqrt(np.sum(d * d, axis=1))
     return {
         "n_match": float(sel_rec.size),
-        "pos_rms": rms,
+        "pos_rms": float(np.sqrt(np.mean(np.sum(d * d, axis=1)))),
         "pos_max": float(np.max(dnorm)),
         "p50": float(np.percentile(dnorm, 50.0)),
         "p90": float(np.percentile(dnorm, 90.0)),
@@ -762,26 +436,11 @@ def compare_z127_positions(
     }
 
 
-def compare_with_snapshot_z0(
-    recon_positions: np.ndarray,
-    recon_ids: np.ndarray,
-    snapshot_dir: Path,
-    box: float,
-    max_files: Optional[int] = 1,
-) -> Dict[str, float]:
+def compare_with_snapshot_z0(recon_positions: np.ndarray, recon_ids: np.ndarray, snapshot_dir: Path, box: float, max_files: Optional[int] = 1) -> Dict[str, float]:
     snap_pos, snap_ids = _load_hdf5_particles(snapshot_dir, max_files=max_files)
-
     sel_rec, sel_snap = _match_particle_ids(recon_ids, snap_ids)
-    if sel_rec.size == 0:
-        return {
-            "n_match": 0,
-            "disp_rms": np.nan,
-            "disp_max": np.nan,
-        }
 
-    r = recon_positions[sel_rec]
-    s = snap_pos[sel_snap]
-    d = _periodic_delta(s, r, box)
+    d = _periodic_delta(snap_pos[sel_snap], recon_positions[sel_rec], box)
     dnorm = np.sqrt(np.sum(d * d, axis=1))
     return {
         "n_match": float(sel_rec.size),
@@ -793,54 +452,25 @@ def compare_with_snapshot_z0(
     }
 
 
-def run_seed_pipeline(
-    preferred_root: Path = Path("/pscratch/sd/l/liuyh15/Quijote/fiducial_LR/0"),
-    force_nmesh: Optional[int] = None,
-    output_tag: str = "seed",
-    max_compare_files: int = 1,
-) -> Dict[str, object]:
-    paths = discover_seed_paths(preferred_root=preferred_root)
-    psi1_file, qinit_file = save_psi1_and_qinit_for_seed(paths, force_nmesh=force_nmesh, output_tag=output_tag)
-    recon = reconstruct_z127_displacement_only(psi1_file, qinit_file, paths.param_file)
-
-    box = float(recon["box"][0])
-    z127 = compare_z127_positions(recon["x_rec"], recon["ids"], paths.ic_ref, box=box, max_files=max_compare_files)
-    z0 = compare_with_snapshot_z0(recon["x_rec"], recon["ids"], paths.snapshot_z0, box=box, max_files=max_compare_files)
-
-    return {
-        "paths": paths,
-        "psi1_file": psi1_file,
-        "qinit_file": qinit_file,
-        "recon": recon,
-        "z127_metrics": z127,
-        "z0_metrics": z0,
-    }
-
-
 def _paint_cic_density(positions: np.ndarray, box: float, grid: int) -> np.ndarray:
-    positions = np.asarray(positions, dtype=np.float32)
     delta = np.zeros((grid, grid, grid), dtype=np.float32)
-
     try:
         import MAS_library as MASL  # type: ignore
 
-        MASL.MA(np.ascontiguousarray(positions), delta, box, "CIC", verbose=False)
-        delta /= np.mean(delta, dtype=np.float64)
-        delta -= 1.0
-        return delta
+        MASL.MA(np.ascontiguousarray(positions.astype(np.float32)), delta, box, "CIC", verbose=False)
     except Exception:
-        # Fallback NGP assignment if MAS_library is unavailable.
         cell = box / grid
         idx = np.floor(positions / cell).astype(np.int64) % grid
         np.add.at(delta, (idx[:, 0], idx[:, 1], idx[:, 2]), 1.0)
-        delta /= np.mean(delta, dtype=np.float64)
-        delta -= 1.0
-        return delta
+
+    delta /= np.mean(delta, dtype=np.float64)
+    delta -= 1.0
+    return delta
 
 
 def _pk_numpy(delta: np.ndarray, box: float) -> Tuple[np.ndarray, np.ndarray]:
     n = delta.shape[0]
-    dk = _rfftn(delta)
+    dk = np.fft.rfftn(delta)
     pk3d = (np.abs(dk) ** 2) / float(n**6)
 
     dx = box / n
@@ -852,14 +482,12 @@ def _pk_numpy(delta: np.ndarray, box: float) -> Tuple[np.ndarray, np.ndarray]:
 
     kflat = kval.ravel()
     pflat = pk3d.ravel()
-    nb = n // 2
-    kbins = np.linspace(0.0, np.max(kflat), nb + 1)
+    kbins = np.linspace(0.0, np.max(kflat), n // 2 + 1)
     num, _ = np.histogram(kflat, bins=kbins, weights=pflat)
     den, _ = np.histogram(kflat, bins=kbins)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        p1d = np.where(den > 0, num / den, np.nan)
+    p1d = np.where(den > 0, num / den, np.nan)
     k1d = 0.5 * (kbins[:-1] + kbins[1:])
+
     m = np.isfinite(p1d) & (k1d > 0)
     return k1d[m], p1d[m]
 
@@ -873,19 +501,10 @@ def compare_power_spectrum_z127(
     grid: int = 256,
 ) -> Dict[str, np.ndarray]:
     ref_pos, ref_ids = _load_hdf5_particles(ic_ref, max_files=max_files)
-
     sel_rec, sel_ref = _match_particle_ids(recon_ids, ref_ids)
-    if sel_rec.size == 0:
-        return {
-            "k_h_mpc": np.array([], dtype=np.float64),
-            "pk_ratio": np.array([], dtype=np.float64),
-            "pk_rec": np.array([], dtype=np.float64),
-            "pk_ref": np.array([], dtype=np.float64),
-        }
 
     rec = recon_positions[sel_rec]
     ref = ref_pos[sel_ref]
-
     delta_rec = _paint_cic_density(rec, box=box, grid=grid)
     delta_ref = _paint_cic_density(ref, box=box, grid=grid)
 
@@ -905,10 +524,7 @@ def compare_power_spectrum_z127(
         pk_rec = pk_rec[:n]
         pk_ref = pk_ref[:n]
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.where(pk_ref > 1e-30, pk_rec / pk_ref, np.nan)
-
-    # Convert k from h/kpc to h/Mpc for plotting readability.
+    ratio = np.where(pk_ref > 1e-30, pk_rec / pk_ref, np.nan)
     return {
         "k_h_mpc": k * 1000.0,
         "pk_ratio": ratio,
