@@ -35,7 +35,7 @@ data_dir   = 'new_tophat0.4'
 model_dir  = 'new_tophat0.4v4'
 filter_dir = data_dir                           # backward-compat alias
 
-epochs     = 5   # smoke-test; bump later for real training
+epochs     = 736   # smoke-test; bump later for real training
 
 ensure_filter_dirs(data_dir, model_dir)
 
@@ -171,3 +171,25 @@ def wn_qinit_path(realization, N_p=N_p):
 def final_snapshot_path(realization, N_p=N_p):
     """Return only the z=0 snapshot path."""
     return snapshot_paths(realization, N_p)[1]
+
+
+# ── Vector-Ψ pipeline config ─────────────────────────────────────────────────
+
+vec_data_dir  = 'new_psi_vec'
+vec_model_dir = 'new_psi_vec_v1'
+vec_batch_size = 512        # reduced from 1024 due to 3× memory per sample
+vec_rotate     = False      # rotation disabled for vector fields
+
+ensure_filter_dirs(vec_data_dir, vec_model_dir)
+
+
+def vec_training_data_path(realizations, ps=patch_size, p=padding, ov=overlap,
+                           rot=vec_rotate, N_p=N_p):
+    tag = f'VEC-N{N_p}PS{ps}P{p}O{int(100 * ov):02d}Rotate{rot}-{realization_tag(realizations)}'
+    return f'{data_path}/{vec_data_dir}/training-data-{tag}.npz'
+
+
+def vec_gan_model_name(realizations, ps=patch_size, p=padding,
+                       rot=vec_rotate, N_p=N_p):
+    rtag = realization_tag(realizations)
+    return f'{model_path}/{vec_model_dir}/gan-VEC-N{N_p}PS{ps}P{p}Rotate{rot}-{rtag}'

@@ -117,3 +117,20 @@ class NewDDDF(DDDF):
         disp_field = np.zeros((N_p, N_p, N_p, 3), dtype=self.real_dtype)
         self.disp_from_par(disp_field, q_init, par_disp, N_p, boxsize)
         return self.divergence(disp_field, veck_main)
+
+    def compute_target_psi_wn(self, q_init, final_pos, N_p, boxsize, veck_main):
+        """Compute both target ∇·Ψ and the full displacement field Ψ.
+
+        Returns
+        -------
+        psi_div : ndarray (N_p, N_p, N_p) – divergence of displacement
+        disp_field : ndarray (N_p, N_p, N_p, 3) – full vector displacement
+        """
+        par_disp = np.asarray(final_pos - q_init, dtype=self.real_dtype)
+        par_disp = np.where(par_disp < -boxsize / 2, par_disp + boxsize, par_disp)
+        par_disp = np.where(par_disp >  boxsize / 2, par_disp - boxsize, par_disp)
+
+        disp_field = np.zeros((N_p, N_p, N_p, 3), dtype=self.real_dtype)
+        self.disp_from_par(disp_field, q_init, par_disp, N_p, boxsize)
+        psi_div = self.divergence(disp_field, veck_main)
+        return psi_div, disp_field

@@ -1,8 +1,8 @@
 """
-Verification helpers for the WN-based IC2RES pipeline.
+Verification helpers for the vector-Ψ WN-based IC2RES pipeline.
 
-Mirrors verify.py but uses NewDDDF + white-noise initial conditions
-instead of Quijote IC snapshots.
+Uses NewDDDF + full vector displacement (psi_bestfit → psi_residual)
+to recover curl/vorticity information.
 """
 
 import os
@@ -13,15 +13,16 @@ import matplotlib.pyplot as plt
 import torch
 import Pk_library as PKL
 
-import model.model as nnmodel
+import model.new_model as nnmodel
 import new_config as cfg
 from new_dddf import NewDDDF
-from pipeline import (
+from new_pipeline import (
+    psi_to_delta,
     psi_div_to_delta,
     compute_best_fit,
-    highpass_field,
+    highpass_vector_field,
 )
-from inference import apply_model_to_field
+from new_inference import apply_model_to_field
 
 
 def _infer_num_pools(state_dict):
@@ -51,13 +52,12 @@ def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=
     if cfg.infer_checkpoint is not None:
         checkpoint_path = cfg.infer_checkpoint
     else:
-        auto_model = cfg.gan_model_name(
+        auto_model = cfg.vec_gan_model_name(
             infer_train_realizations,
             cfg.patch_size,
             cfg.padding,
-            cfg.rotate,
+            cfg.vec_rotate,
             cfg.N_p,
-            model_dir=cfg.model_dir,
         )
         checkpoint_path = f"{auto_model}-e{infer_epochs}.pth"
 
@@ -69,7 +69,17 @@ def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=
 def _load_model(checkpoint_path, device):
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     num_pools = _infer_num_pools(state_dict)
-    model = nnmodel.UNet3D(n_classes=1, trilinear=True, base_channels=16, num_pools=num_pools)
+    # Infer in_channels from the first conv layer weight shape
+    inc_key = 'inc.double_conv.0.weight'
+    if inc_key in state_dict:
+        in_channels = state_dict[inc_key].shape[1]
+    else:
+        in_channels = 3  # default for vector pipeline
+    n_classes = in_channels  # symmetric: in_channels == n_classes
+    model = nnmodel.UNet3D(
+        n_classes=n_classes, in_channels=in_channels,
+        trilinear=True, base_channels=16, num_pools=num_pools,
+    )
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -127,12 +137,12 @@ def verify_realization(
     )
     final_delta = final_info['delta']
 
-    # ── Target displacement divergence ────────────────────────────────────
-    target_psi_div = dl.compute_target_psi_div_wn(
+    # ── Target displacement (vector + divergence) ──────────────────────
+    target_psi_div, target_psi = dl.compute_target_psi_wn(
         q_init, final_info['pos'], N_p, boxsize, veck_main)
 
-    # ── Best-fit ──────────────────────────────────────────────────────────
-    best_fit_psi_div, best_fit_delta, target_delta = compute_best_fit(
+    # ── Best-fit (returns 4-tuple including vector psi) ───────────────
+    best_fit_psi_div, best_fit_psi, best_fit_delta, target_delta = compute_best_fit(
         dl, init_delta, target_psi_div,
         q_init, final_delta,
         veck_main, N_p, boxsize, MAS,
@@ -155,32 +165,32 @@ def verify_realization(
     )
 
     residual_pred = apply_model_to_field(
-        init_delta,
+        best_fit_psi,
         loaded_model,
         cfg.infer_patch_size,
         cfg.infer_padding,
         cfg.infer_overlap,
         device,
     )
-    residual_pred = highpass_field(residual_pred, k_cut, boxsize, width=k_width)
+    residual_pred = highpass_vector_field(residual_pred, k_cut, boxsize, width=k_width)
 
-    final_psi_div = best_fit_psi_div + residual_pred
-    delta_final = psi_div_to_delta(
-        final_psi_div, dl, q_init, veck_main, N_p, boxsize, MAS)
-    delta_recovered = psi_div_to_delta(
-        target_psi_div, dl, q_init, veck_main, N_p, boxsize, MAS)
+    final_psi = best_fit_psi + residual_pred
+    delta_final = psi_to_delta(
+        final_psi, dl, q_init, N_p, boxsize, MAS)
+    delta_recovered = psi_to_delta(
+        target_psi, dl, q_init, N_p, boxsize, MAS)
     delta_residual = delta_recovered - delta_final
 
     labels = ["N-body", "best-fit", "best-fit + IC2RES", "Recovered"]
     deltas = [target_delta, best_fit_delta, delta_final, delta_recovered]
 
     # ── Overdensity slices ────────────────────────────────────────────────
-    slice_labels = ["N-body", "best-fit", "best-fit + IC2RES", "Residual to Recovered"]
+    slice_labels = ["N-body", "best-fit", "best-fit + IC2RES", "Residual to N-body"]
     slice_deltas = [target_delta, best_fit_delta, delta_final, delta_residual]
     fig, axes = plt.subplots(2, 2, figsize=(10, 10))
     for ax, d, lab in zip(axes.flat, slice_deltas, slice_labels):
         img = np.mean(d[:1], axis=0).T
-        if lab == "Residual to Recovered":
+        if lab == "Residual to N-body":
             im = ax.imshow(img, cmap="RdBu_r", vmin=-2, vmax=2, origin="lower")
             plt.colorbar(im, ax=ax)
         else:
