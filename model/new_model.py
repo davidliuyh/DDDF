@@ -224,3 +224,43 @@ class PatchDiscriminator3D(nn.Module):
         if return_features:
             return out, features
         return out
+
+
+# ── MultiScaleDiscriminator3D ─────────────────────────────────────────────────
+
+class MultiScaleDiscriminator3D(nn.Module):
+    """Multi-scale 3D PatchGAN discriminator (pix2pixHD style).
+
+    Sub-discriminators (all at the same spatial resolution):
+    - D_fine   (n_layers=1, stride=2) → large output map (~10³ for 20³ input),
+                                        sensitive to local high-frequency structure.
+    - D_coarse (n_layers=n_layers_coarse, stride=2) → small output map (~3³),
+                                        captures global patch-level structure.
+
+    forward() returns:
+      return_features=False : list of logit tensors
+      return_features=True  : list of (logits, features_list) tuples
+    """
+
+    def __init__(self, in_channels: int = 6, base_channels: int = 64,
+                 n_layers_coarse: int = 3, use_spectral_norm: bool = False,
+                 spectral_norm_impl: str = 'native'):
+        super().__init__()
+        discs = [
+            PatchDiscriminator3D(
+                in_channels=in_channels, base_channels=base_channels,
+                n_layers=1, use_spectral_norm=use_spectral_norm,
+                spectral_norm_impl=spectral_norm_impl,
+            ),  # D_fine
+            PatchDiscriminator3D(
+                in_channels=in_channels, base_channels=base_channels,
+                n_layers=n_layers_coarse, use_spectral_norm=use_spectral_norm,
+                spectral_norm_impl=spectral_norm_impl,
+            ),  # D_coarse
+        ]
+        self.discriminators = nn.ModuleList(discs)
+
+    def forward(self, ic: torch.Tensor, residual: torch.Tensor,
+                return_features: bool = False):
+        return [d(ic, residual, return_features=return_features)
+                for d in self.discriminators]

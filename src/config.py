@@ -134,42 +134,7 @@ gan_v3 = {
     'infer_overlap': 0.0,
 }
 
-gan_v4 = {
-    'data_dir': 'tophat0.4',
-    'model_dir': 'tophat0.4v4',
-    'overlap': 0.0,
-    'batch_size': 1024,
-    'epochs': 268,
-    'gan_lambda_pixel': 5.0,
-    'gan_lr_g': 1e-4,
-    'gan_lr_d': 5e-5,
-    'gan_n_disc_layers': 3,
-    'gan_lambda_fm': 20.0,
-    'gan_lambda_gp': 10.0,
-    'gan_d_update_interval': 3,
-    'gan_use_spectral_norm': False,
-    'infer_overlap': 0.0,
-}
-
-gan_v5 = {
-    'data_dir': 'tophat0.4',
-    'model_dir': 'tophat0.4v5',
-    'overlap': 0.0,
-    'batch_size': 256,
-    'epochs': 100,
-    'gan_lambda_pixel': 2.0,
-    'gan_lr_g': 1e-4,
-    'gan_lr_d': 5e-5,
-    'gan_n_disc_layers': 3,
-    'gan_lambda_fm': 10.0,
-    'gan_lambda_gp': 10.0,
-    'gan_d_update_interval': 2,
-    'gan_use_spectral_norm': False,
-    'infer_overlap': 0.25,
-}
-
-
-active_gan_defaults = gan_v4
+active_gan_defaults = gan_v3
 
 # Active subdirs and hyperparameters are always sourced from the selected preset.
 data_dir              = active_gan_defaults.get('data_dir', active_gan_defaults.get('filter_dir'))

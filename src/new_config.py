@@ -32,7 +32,7 @@ def ensure_filter_dirs(data_dir, model_dir=None):
 
 # ── Override directories and epochs ──────────────────────────────────────────
 data_dir   = 'new_tophat0.4'
-model_dir  = 'new_tophat0.4v4'
+model_dir  = 'new_tophat0.4v3'
 filter_dir = data_dir                           # backward-compat alias
 
 epochs     = 736   # smoke-test; bump later for real training
@@ -84,7 +84,7 @@ gan_use_spectral_norm = False
 # ── Inference hyperparameters ─────────────────────────────────────────────────
 infer_patch_size  = 20
 infer_padding     = 2
-infer_overlap     = 0.0
+infer_overlap     = 0.25
 infer_epochs      = epochs   # default: use the training epochs
 infer_checkpoint  = None     # None → auto-derive from training model_name + infer_epochs
 
@@ -175,10 +175,84 @@ def final_snapshot_path(realization, N_p=N_p):
 
 # ── Vector-Ψ pipeline config ─────────────────────────────────────────────────
 
-vec_data_dir  = 'new_psi_vec'
-vec_model_dir = 'new_psi_vec_v1'
-vec_batch_size = 512        # reduced from 1024 due to 3× memory per sample
-vec_rotate     = False      # rotation disabled for vector fields
+# Versioned vector-GAN presets, mirroring config.py style (gan_v1/gan_v2/...).
+vec_gan_v1 = {
+    'vec_data_dir': 'new_psi_vec',
+    'vec_model_dir': 'new_psi_vec_v1',
+    'vec_batch_size': 512,
+    'vec_rotate': False,
+    'vec_unet_base_channels': 16,
+    'epochs': 736,
+    'gan_lambda_pixel': 5.0,
+    'gan_lr_g': 1e-4,
+    'gan_lr_d': 5e-5,
+    'gan_n_disc_layers': 3,
+    'gan_lambda_fm': 20.0,
+    'gan_lambda_gp': 10.0,
+    'gan_d_update_interval': 3,
+    'gan_use_spectral_norm': False,
+}
+
+vec_gan_v2 = {
+    'vec_data_dir': 'new_psi_vec',
+    'vec_model_dir': 'new_psi_vec_v2',
+    'vec_batch_size': 512,
+    'vec_rotate': False,
+    'vec_unet_base_channels': 32,
+    'epochs': 100,
+    'gan_lambda_pixel': 5.0,
+    'gan_lr_g': 1e-4,
+    'gan_lr_d': 5e-5,
+    'gan_n_disc_layers': 3,
+    'gan_lambda_fm': 20.0,
+    'gan_lambda_gp': 10.0,
+    'gan_d_update_interval': 3,
+    'gan_use_spectral_norm': False,
+    'gan_use_multiscale_disc': False,
+    'gan_disc_base_channels': 32,
+}
+
+vec_gan_v3 = {
+    'vec_data_dir': 'new_psi_vec',
+    'vec_model_dir': 'new_psi_vec_v3',
+    'vec_batch_size': 512,
+    'vec_rotate': False,
+    'vec_unet_base_channels': 32,
+    'epochs': 200,
+    'gan_lambda_pixel': 5.0,
+    'gan_lr_g': 1e-4,
+    'gan_lr_d': 1e-4,
+    'gan_n_disc_layers': 3,
+    'gan_lambda_fm': 20.0,
+    'gan_lambda_gp': 10.0,
+    'gan_d_update_interval': 1,
+    'gan_use_spectral_norm': False,
+    'gan_use_multiscale_disc': True,
+    'gan_disc_base_channels': 64,
+}
+
+# Activate one vector preset here.
+active_vec_gan_defaults = vec_gan_v3
+
+vec_data_dir  = active_vec_gan_defaults['vec_data_dir']
+vec_model_dir = active_vec_gan_defaults['vec_model_dir']
+vec_batch_size = active_vec_gan_defaults['vec_batch_size']
+vec_rotate     = active_vec_gan_defaults['vec_rotate']
+vec_unet_base_channels = active_vec_gan_defaults['vec_unet_base_channels']
+
+# Keep training GAN hyperparameters synchronized with the active vector preset.
+epochs                = active_vec_gan_defaults['epochs']
+gan_lambda_pixel      = active_vec_gan_defaults['gan_lambda_pixel']
+gan_lr_g              = active_vec_gan_defaults['gan_lr_g']
+gan_lr_d              = active_vec_gan_defaults['gan_lr_d']
+gan_n_disc_layers     = active_vec_gan_defaults['gan_n_disc_layers']
+gan_lambda_fm         = active_vec_gan_defaults['gan_lambda_fm']
+gan_lambda_gp         = active_vec_gan_defaults['gan_lambda_gp']
+gan_d_update_interval = active_vec_gan_defaults['gan_d_update_interval']
+gan_use_spectral_norm = active_vec_gan_defaults['gan_use_spectral_norm']
+gan_use_multiscale_disc = active_vec_gan_defaults['gan_use_multiscale_disc']
+gan_disc_base_channels  = active_vec_gan_defaults['gan_disc_base_channels']
+infer_epochs          = epochs
 
 ensure_filter_dirs(vec_data_dir, vec_model_dir)
 

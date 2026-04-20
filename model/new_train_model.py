@@ -21,7 +21,7 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
               lr_g=1e-4, lr_d=1e-4, lambda_pixel=10.0, n_disc_layers=3,
               lambda_fm=10.0, d_update_interval=2, use_spectral_norm=True,
               checkpoint_interval=10, resume_checkpoint=None, overwrite=False,
-              lambda_gp=10.0):
+              lambda_gp=10.0, use_multiscale_disc=False, disc_base_channels=32):
     """Conditional GAN training with WGAN-GP for multi-channel fields.
 
     Auto-detects channel count from data:
@@ -59,6 +59,14 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
     num_pools   = max(1, min(5, int(np.floor(np.log2(min_spatial)))))
     print(f"Auto-selected number of pooling levels: {num_pools} (min side={min_spatial})")
 
+    # Optional config-driven generator width (fallback keeps backward compatibility).
+    try:
+        import new_config as cfg  # available when training is launched from src workflow
+        base_channels = int(getattr(cfg, 'vec_unet_base_channels', 16))
+    except Exception:
+        base_channels = 16
+    print(f"Generator base_channels: {base_channels}")
+
     loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(input_t, target_t),
         batch_size=batch_size, shuffle=True)
@@ -69,26 +77,37 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
 
     net_G = nnmodel.UNet3D(
         n_classes=n_channels, in_channels=n_channels,
-        trilinear=True, base_channels=16, num_pools=num_pools,
+        trilinear=True, base_channels=base_channels, num_pools=num_pools,
     ).to(device)
 
     disc_in_channels = 2 * n_channels  # condition + prediction
     sn_impl = 'native'
-    net_D = nnmodel.PatchDiscriminator3D(
-        in_channels=disc_in_channels,
-        base_channels=32,
-        n_layers=n_disc_layers,
-        use_spectral_norm=use_spectral_norm,
-        spectral_norm_impl=sn_impl,
-    ).to(device)
+    if use_multiscale_disc:
+        net_D = nnmodel.MultiScaleDiscriminator3D(
+            in_channels=disc_in_channels,
+            base_channels=disc_base_channels,
+            n_layers_coarse=n_disc_layers,
+            use_spectral_norm=use_spectral_norm,
+            spectral_norm_impl=sn_impl,
+        ).to(device)
+    else:
+        net_D = nnmodel.PatchDiscriminator3D(
+            in_channels=disc_in_channels,
+            base_channels=disc_base_channels,
+            n_layers=n_disc_layers,
+            use_spectral_norm=use_spectral_norm,
+            spectral_norm_impl=sn_impl,
+        ).to(device)
 
     total_G = sum(p.numel() for p in net_G.parameters())
     total_D = sum(p.numel() for p in net_D.parameters())
     print(f"Generator parameters: {total_G:,}")
     print(f"Discriminator parameters: {total_D:,}")
     print(f"n_channels={n_channels}, lambda_pixel={lambda_pixel}, lambda_fm={lambda_fm}, "
-          f"n_disc_layers={n_disc_layers}, d_update_interval={d_update_interval}, "
-          f"use_spectral_norm={use_spectral_norm}, sn_impl={sn_impl}, batch_size={batch_size}")
+          f"n_disc_layers={n_disc_layers}, "
+          f"d_update_interval={d_update_interval}, "
+          f"use_spectral_norm={use_spectral_norm}, sn_impl={sn_impl}, batch_size={batch_size}, "
+            f"use_multiscale_disc={use_multiscale_disc}, disc_base_channels={disc_base_channels}")
 
     opt_G = torch.optim.AdamW(net_G.parameters(), lr=lr_g, betas=(0.5, 0.999))
     opt_D = torch.optim.AdamW(net_D.parameters(), lr=lr_d, betas=(0.5, 0.999))
@@ -103,19 +122,37 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
     torch.cuda.empty_cache()
     start_epoch = 0
 
+    def _d_forward(ic, res):
+        """Returns list of logit tensors (one per sub-discriminator)."""
+        out = net_D(ic, res)
+        return out if isinstance(out, list) else [out]
+
+    def _d_forward_feats(ic, res):
+        """Returns (list_of_logits, flat_list_of_feature_tensors)."""
+        out = net_D(ic, res, return_features=True)
+        if isinstance(out, list):
+            logits = [item[0] for item in out]
+            feats  = [f for item in out for f in item[1]]
+        else:
+            logits = [out[0]]
+            feats  = out[1]
+        return logits, feats
+
     def _gradient_penalty(cond_x, real_y, fake_y):
         bsz = real_y.size(0)
         alpha = torch.rand(bsz, 1, 1, 1, 1, device=device)
         interp = (alpha * real_y + (1.0 - alpha) * fake_y).requires_grad_(True)
-        pred_interp = net_D(cond_x, interp)
-        grad_outputs = torch.ones_like(pred_interp, device=device)
-        gradients = torch.autograd.grad(
-            outputs=pred_interp, inputs=interp,
-            grad_outputs=grad_outputs,
-            create_graph=True, retain_graph=True, only_inputs=True,
-        )[0]
-        gradients = gradients.view(bsz, -1)
-        return ((gradients.norm(2, dim=1) - 1.0) ** 2).mean()
+        gp_terms = []
+        for pred_interp in _d_forward(cond_x, interp):
+            grad_outputs = torch.ones_like(pred_interp, device=device)
+            gradients = torch.autograd.grad(
+                outputs=pred_interp, inputs=interp,
+                grad_outputs=grad_outputs,
+                create_graph=True, retain_graph=True, only_inputs=True,
+            )[0]
+            gradients = gradients.view(bsz, -1)
+            gp_terms.append(((gradients.norm(2, dim=1) - 1.0) ** 2).mean())
+        return torch.stack(gp_terms).mean()
 
     # ── Auto-resume ────────────────────────────────────────────────────────
     if overwrite and resume_checkpoint == 'auto':
@@ -183,11 +220,19 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
                         return False
                     print('Switching discriminator SN to cpu_power_iter...')
                     sn_impl = 'cpu_power_iter'
-                    net_D = nnmodel.PatchDiscriminator3D(
-                        in_channels=disc_in_channels,
-                        base_channels=32, n_layers=n_disc_layers,
-                        use_spectral_norm=True, spectral_norm_impl=sn_impl,
-                    ).to(device)
+                    if use_multiscale_disc:
+                        net_D = nnmodel.MultiScaleDiscriminator3D(
+                            in_channels=disc_in_channels,
+                            base_channels=disc_base_channels,
+                            n_layers_coarse=n_disc_layers,
+                            use_spectral_norm=True, spectral_norm_impl=sn_impl,
+                        ).to(device)
+                    else:
+                        net_D = nnmodel.PatchDiscriminator3D(
+                            in_channels=disc_in_channels,
+                            base_channels=disc_base_channels, n_layers=n_disc_layers,
+                            use_spectral_norm=True, spectral_norm_impl=sn_impl,
+                        ).to(device)
                     opt_D = torch.optim.AdamW(net_D.parameters(), lr=lr_d, betas=(0.5, 0.999))
                     scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(
                         opt_D, T_max=epochs, eta_min=lr_d * 0.01)
@@ -199,26 +244,36 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
             if batch_idx % d_update_interval == 0:
                 opt_D.zero_grad()
                 try:
-                    pred_real = net_D(xb_dm, yb_dm)
-                    pred_fake = net_D(xb_dm, fake_dm.detach())
+                    pred_real_list = _d_forward(xb_dm, yb_dm)
+                    pred_fake_list = _d_forward(xb_dm, fake_dm.detach())
                 except RuntimeError as e:
                     if _switch_sn_impl_and_reset_d(e):
-                        pred_real = net_D(xb_dm, yb_dm)
-                        pred_fake = net_D(xb_dm, fake_dm.detach())
+                        pred_real_list = _d_forward(xb_dm, yb_dm)
+                        pred_fake_list = _d_forward(xb_dm, fake_dm.detach())
                     else:
                         raise
                 gp = _gradient_penalty(xb_dm, yb_dm, fake_dm.detach())
-                loss_D = pred_fake.mean() - pred_real.mean() + lambda_gp * gp
+                n_d = len(pred_real_list)
+                loss_D = (
+                    sum(pf.mean() - pr.mean()
+                        for pf, pr in zip(pred_fake_list, pred_real_list)) / n_d
+                    + lambda_gp * gp
+                )
                 try:
                     loss_D.backward()
                     opt_D.step()
                 except RuntimeError as e:
                     if _switch_sn_impl_and_reset_d(e):
                         opt_D.zero_grad()
-                        pred_real = net_D(xb_dm, yb_dm)
-                        pred_fake = net_D(xb_dm, fake_dm.detach())
+                        pred_real_list = _d_forward(xb_dm, yb_dm)
+                        pred_fake_list = _d_forward(xb_dm, fake_dm.detach())
                         gp = _gradient_penalty(xb_dm, yb_dm, fake_dm.detach())
-                        loss_D = pred_fake.mean() - pred_real.mean() + lambda_gp * gp
+                        n_d = len(pred_real_list)
+                        loss_D = (
+                            sum(pf.mean() - pr.mean()
+                                for pf, pr in zip(pred_fake_list, pred_real_list)) / n_d
+                            + lambda_gp * gp
+                        )
                         loss_D.backward()
                         opt_D.step()
                     else:
@@ -232,30 +287,32 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
             if lambda_fm > 0:
                 try:
                     with torch.no_grad():
-                        _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
-                    pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
+                        _, feats_real = _d_forward_feats(xb_dm, yb_dm)
+                    pred_fake_list, feats_fake = _d_forward_feats(xb_dm, fake_dm)
                 except RuntimeError as e:
                     if _switch_sn_impl_and_reset_d(e):
                         with torch.no_grad():
-                            _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
-                        pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
+                            _, feats_real = _d_forward_feats(xb_dm, yb_dm)
+                        pred_fake_list, feats_fake = _d_forward_feats(xb_dm, fake_dm)
                     else:
                         raise
                 loss_fm = torch.stack([F.mse_loss(ff, fr)
                                        for ff, fr in zip(feats_fake, feats_real)]).mean()
             else:
                 try:
-                    pred_fake_G = net_D(xb_dm, fake_dm)
+                    pred_fake_list = _d_forward(xb_dm, fake_dm)
                 except RuntimeError as e:
                     if _switch_sn_impl_and_reset_d(e):
-                        pred_fake_G = net_D(xb_dm, fake_dm)
+                        pred_fake_list = _d_forward(xb_dm, fake_dm)
                     else:
                         raise
                 loss_fm = torch.tensor(0.0, device=device)
 
-            loss_adv   = -pred_fake_G.mean()
+            n_d = len(pred_fake_list)
+            loss_adv   = sum(-pf.mean() for pf in pred_fake_list) / n_d
             loss_pixel = criterion_pixel(fake_dm, yb_dm)
-            loss_G = loss_adv + lambda_pixel * loss_pixel + lambda_fm * loss_fm
+            loss_G = (loss_adv + lambda_pixel * loss_pixel +
+                      lambda_fm * loss_fm)
             try:
                 loss_G.backward()
                 opt_G.step()
@@ -264,16 +321,18 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
                     opt_G.zero_grad()
                     if lambda_fm > 0:
                         with torch.no_grad():
-                            _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
-                        pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
+                            _, feats_real = _d_forward_feats(xb_dm, yb_dm)
+                        pred_fake_list, feats_fake = _d_forward_feats(xb_dm, fake_dm)
                         loss_fm = torch.stack([F.mse_loss(ff, fr)
                                                for ff, fr in zip(feats_fake, feats_real)]).mean()
                     else:
-                        pred_fake_G = net_D(xb_dm, fake_dm)
+                        pred_fake_list = _d_forward(xb_dm, fake_dm)
                         loss_fm = torch.tensor(0.0, device=device)
-                    loss_adv   = -pred_fake_G.mean()
+                    n_d = len(pred_fake_list)
+                    loss_adv   = sum(-pf.mean() for pf in pred_fake_list) / n_d
                     loss_pixel = criterion_pixel(fake_dm, yb_dm)
-                    loss_G = loss_adv + lambda_pixel * loss_pixel + lambda_fm * loss_fm
+                    loss_G = (loss_adv + lambda_pixel * loss_pixel +
+                              lambda_fm * loss_fm)
                     loss_G.backward()
                     opt_G.step()
                 else:

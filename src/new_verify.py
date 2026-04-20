@@ -69,16 +69,18 @@ def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=
 def _load_model(checkpoint_path, device):
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     num_pools = _infer_num_pools(state_dict)
-    # Infer in_channels from the first conv layer weight shape
+    # Infer channels from the first conv layer weight shape
     inc_key = 'inc.double_conv.0.weight'
     if inc_key in state_dict:
         in_channels = state_dict[inc_key].shape[1]
+        base_channels = state_dict[inc_key].shape[0]
     else:
         in_channels = 3  # default for vector pipeline
+        base_channels = 16
     n_classes = in_channels  # symmetric: in_channels == n_classes
     model = nnmodel.UNet3D(
         n_classes=n_classes, in_channels=in_channels,
-        trilinear=True, base_channels=16, num_pools=num_pools,
+        trilinear=True, base_channels=base_channels, num_pools=num_pools,
     )
     model.load_state_dict(state_dict)
     model.to(device)
@@ -89,7 +91,7 @@ def _load_model(checkpoint_path, device):
 def verify_realization(
     realization,
     model=None,
-    k_cut=0.061,
+    k_cut=0.055,
     k_width=0.01,
     coef_file=None,
     infer_train_realizations=None,
@@ -181,8 +183,8 @@ def verify_realization(
         target_psi, dl, q_init, N_p, boxsize, MAS)
     delta_residual = delta_recovered - delta_final
 
-    labels = ["N-body", "best-fit", "best-fit + IC2RES", "Recovered"]
-    deltas = [target_delta, best_fit_delta, delta_final, delta_recovered]
+    labels = ["N-body", "best-fit", "best-fit + IC2RES"]
+    deltas = [target_delta, best_fit_delta, delta_final]
 
     # ── Overdensity slices ────────────────────────────────────────────────
     slice_labels = ["N-body", "best-fit", "best-fit + IC2RES", "Residual to N-body"]
@@ -237,7 +239,9 @@ def verify_realization(
     for pk, lab in zip(pks, labels):
         ax.plot(k_values, pk.Pk[:, 0] / pks[0].Pk[:, 0], label=lab)
     ax.legend()
-    plt.title(f"[r{realization}] Matter power spectrum z=0 (WN)")
+    ax.set_title(f"[r{realization}] P/P_Nbody z=0 (WN)")
+
+    plt.tight_layout()
     plt.show()
 
     for pk, lab in zip(pks, labels):
