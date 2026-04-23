@@ -1,3 +1,11 @@
+"""
+GAN training adapted for multi-channel (vector displacement) data.
+
+Extends train_model.py to auto-detect the number of channels from the
+training data shape and use the configurable-channel UNet3D / PatchDiscriminator3D
+from model.py.
+"""
+
 import os
 import time
 from datetime import datetime, timedelta
@@ -11,33 +19,14 @@ from tqdm.auto import tqdm
 
 def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
               lr_g=1e-4, lr_d=1e-4, lambda_pixel=10.0, n_disc_layers=3,
-              lambda_fm=10.0, d_update_interval=2, use_spectral_norm=True,
+              lambda_fm=10.0, d_update_interval=2,
               checkpoint_interval=10, resume_checkpoint=None, overwrite=False,
-              lambda_gp=10.0):
-    """Conditional GAN training with WGAN-GP adversarial loss.
+              lambda_gp=10.0, use_multiscale_disc=False, disc_base_channels=32):
+    """Conditional GAN training with WGAN-GP for multi-channel fields.
 
-    Generator  : UNet3D
-    Discriminator: PatchDiscriminator3D conditioned on IC
-
-    Loss_D = E[D(IC,fake)] - E[D(IC,real)] + lambda_gp * GP
-    Loss_G = -E[D(IC,fake)]                           [adversarial]
-           + lambda_pixel * MSE(fake, real)            [pixel]
-           + lambda_fm    * FeatureMatching(fake,real)  [FM]
-
-    Anti-collapse improvements:
-    - use_spectral_norm : apply spectral normalisation to every D Conv3d,
-                          limiting the Lipschitz constant and slowing D.
-    - d_update_interval : update D only every N batches so G has more
-                          gradient steps relative to D.
-    - lambda_fm         : feature-matching loss that aligns D's
-                          intermediate activations for fake vs. real,
-                          giving G a richer, more stable training signal.
-    - CosineAnnealingLR : smoothly decay both lr_g and lr_d to 1 % of
-                          their initial values over the full training run.
-
-    Checkpoint (.ckpt) stores G + D + both optimizers + both schedulers.
-    Final .pth stores only the generator state dict → compatible with
-    the existing apply_model_to_field inference path.
+    Auto-detects channel count from data:
+    - 3D patches (N, D, H, W): single-channel, unsqueeze to (N, 1, D, H, W)
+    - 4D patches (N, D, H, W, C): multi-channel, permute to (N, C, D, H, W)
     """
     final_path = f'{save_file_name}-e{epochs}.pth'
     if not overwrite and os.path.exists(final_path):
@@ -48,42 +37,76 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
     input_patches  = data['input_patches']
     target_patches = data['target_patches']
 
-    spatial_shape = input_patches.shape[1:4]
-    min_spatial   = min(spatial_shape)
-    num_pools     = max(1, min(5, int(np.floor(np.log2(min_spatial)))))
-    print(f"Training patch spatial shape: {spatial_shape}")
+    # ── Auto-detect channels ──────────────────────────────────────────────
+    if input_patches.ndim == 4:
+        # (N, D, H, W) → scalar, add channel dim
+        n_channels = 1
+        spatial_shape = input_patches.shape[1:4]
+        input_t  = torch.from_numpy(input_patches).unsqueeze(1).float()
+        target_t = torch.from_numpy(target_patches).unsqueeze(1).float()
+    elif input_patches.ndim == 5:
+        # (N, D, H, W, C) → multi-channel, permute to (N, C, D, H, W)
+        n_channels = input_patches.shape[-1]
+        spatial_shape = input_patches.shape[1:4]
+        input_t  = torch.from_numpy(input_patches).permute(0, 4, 1, 2, 3).float()
+        target_t = torch.from_numpy(target_patches).permute(0, 4, 1, 2, 3).float()
+    else:
+        raise ValueError(f"Expected 4D or 5D patches, got {input_patches.ndim}D")
+
+    print(f"Detected {n_channels} channel(s), spatial shape {spatial_shape}")
+
+    min_spatial = min(spatial_shape)
+    num_pools   = max(1, min(5, int(np.floor(np.log2(min_spatial)))))
     print(f"Auto-selected number of pooling levels: {num_pools} (min side={min_spatial})")
 
-    input_t  = torch.from_numpy(input_patches).unsqueeze(1).float()
-    target_t = torch.from_numpy(target_patches).unsqueeze(1).float()
-    loader   = torch.utils.data.DataLoader(
+    # Optional config-driven generator width (fallback keeps backward compatibility).
+    try:
+        import config as cfg  # available when training is launched from src workflow
+        base_channels = int(getattr(cfg, 'vec_unet_base_channels', 16))
+    except Exception:
+        base_channels = 16
+    print(f"Generator base_channels: {base_channels}")
+
+    loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(input_t, target_t),
         batch_size=batch_size, shuffle=True)
+    n_samples = input_t.shape[0]
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    net_G = nnmodel.UNet3D(n_classes=1, trilinear=True,
-                            base_channels=16, num_pools=num_pools).to(device)
-    sn_impl = 'native'
-    net_D = nnmodel.PatchDiscriminator3D(in_channels=2,
-                                          base_channels=32,
-                                          n_layers=n_disc_layers,
-                                          use_spectral_norm=use_spectral_norm,
-                                          spectral_norm_impl=sn_impl).to(device)
+    net_G = nnmodel.UNet3D(
+        n_classes=n_channels, in_channels=n_channels,
+        trilinear=True, base_channels=base_channels, num_pools=num_pools,
+    ).to(device)
+
+    disc_in_channels = 2 * n_channels  # condition + prediction
+    if use_multiscale_disc:
+        net_D = nnmodel.MultiScaleDiscriminator3D(
+            in_channels=disc_in_channels,
+            base_channels=disc_base_channels,
+            n_layers_coarse=n_disc_layers,
+        ).to(device)
+    else:
+        net_D = nnmodel.PatchDiscriminator3D(
+            in_channels=disc_in_channels,
+            base_channels=disc_base_channels,
+            n_layers=n_disc_layers,
+        ).to(device)
 
     total_G = sum(p.numel() for p in net_G.parameters())
     total_D = sum(p.numel() for p in net_D.parameters())
     print(f"Generator parameters: {total_G:,}")
     print(f"Discriminator parameters: {total_D:,}")
-    print(f"lambda_pixel={lambda_pixel}, lambda_fm={lambda_fm}, "
-          f"n_disc_layers={n_disc_layers}, d_update_interval={d_update_interval}, "
-            f"use_spectral_norm={use_spectral_norm}, sn_impl={sn_impl}, batch_size={batch_size}")
+    print(f"n_channels={n_channels}, lambda_pixel={lambda_pixel}, lambda_fm={lambda_fm}, "
+          f"n_disc_layers={n_disc_layers}, "
+          f"d_update_interval={d_update_interval}, "
+            f"batch_size={batch_size}, "
+            f"use_multiscale_disc={use_multiscale_disc}, disc_base_channels={disc_base_channels}")
 
     opt_G = torch.optim.AdamW(net_G.parameters(), lr=lr_g, betas=(0.5, 0.999))
     opt_D = torch.optim.AdamW(net_D.parameters(), lr=lr_d, betas=(0.5, 0.999))
 
-    # Cosine annealing: decay lr to 1% of initial over full training run
     scheduler_G = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt_G, T_max=epochs, eta_min=lr_g * 0.01)
     scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -94,25 +117,39 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
     torch.cuda.empty_cache()
     start_epoch = 0
 
+    def _d_forward(ic, res):
+        """Returns list of logit tensors (one per sub-discriminator)."""
+        out = net_D(ic, res)
+        return out if isinstance(out, list) else [out]
+
+    def _d_forward_feats(ic, res):
+        """Returns (list_of_logits, flat_list_of_feature_tensors)."""
+        out = net_D(ic, res, return_features=True)
+        if isinstance(out, list):
+            logits = [item[0] for item in out]
+            feats  = [f for item in out for f in item[1]]
+        else:
+            logits = [out[0]]
+            feats  = out[1]
+        return logits, feats
+
     def _gradient_penalty(cond_x, real_y, fake_y):
         bsz = real_y.size(0)
         alpha = torch.rand(bsz, 1, 1, 1, 1, device=device)
         interp = (alpha * real_y + (1.0 - alpha) * fake_y).requires_grad_(True)
-        pred_interp = net_D(cond_x, interp)
-        grad_outputs = torch.ones_like(pred_interp, device=device)
-        gradients = torch.autograd.grad(
-            outputs=pred_interp,
-            inputs=interp,
-            grad_outputs=grad_outputs,
-            create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
-        )[0]
-        gradients = gradients.view(bsz, -1)
-        return ((gradients.norm(2, dim=1) - 1.0) ** 2).mean()
+        gp_terms = []
+        for pred_interp in _d_forward(cond_x, interp):
+            grad_outputs = torch.ones_like(pred_interp, device=device)
+            gradients = torch.autograd.grad(
+                outputs=pred_interp, inputs=interp,
+                grad_outputs=grad_outputs,
+                create_graph=True, retain_graph=True, only_inputs=True,
+            )[0]
+            gradients = gradients.view(bsz, -1)
+            gp_terms.append(((gradients.norm(2, dim=1) - 1.0) ** 2).mean())
+        return torch.stack(gp_terms).mean()
 
-    # ── Auto-resume ────────────────────────────────────────────────────────────
-    # overwrite=True means "retrain from scratch" — skip any existing checkpoint.
+    # ── Auto-resume ────────────────────────────────────────────────────────
     if overwrite and resume_checkpoint == 'auto':
         print("overwrite=True, skipping checkpoints and starting from scratch.")
         resume_checkpoint = None
@@ -141,11 +178,11 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
                 scheduler_G.load_state_dict(ckpt['scheduler_G_state'])
                 scheduler_D.load_state_dict(ckpt['scheduler_D_state'])
         except RuntimeError as e:
-            print(f"  Warning: discriminator checkpoint is incompatible with current architecture; continuing with randomly initialized D/optimizer.\n  ({e})")
+            print(f"  Warning: checkpoint incompatible; continuing with fresh D/optimizer.\n  ({e})")
         start_epoch = ckpt['epoch']
         print(f"Completed {start_epoch} epochs, continue training to epoch {epochs}.")
 
-    # ── Training loop ──────────────────────────────────────────────────────────
+    # ── Training loop ──────────────────────────────────────────────────────
     train_start_time = time.perf_counter()
     sum_epoch_seconds = 0.0
 
@@ -156,144 +193,58 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
         sum_G = sum_D = 0.0
 
         epoch_bar = tqdm(
-            loader,
-            total=len(loader),
+            loader, total=len(loader),
             desc=f'Epoch {epoch+1}/{epochs}',
-            unit='batch',
-            dynamic_ncols=True,
-            leave=True,
+            unit='batch', dynamic_ncols=True, leave=True,
         )
 
         for batch_idx, (xb, yb) in enumerate(epoch_bar, start=1):
             xb = xb.to(device)
             yb = yb.to(device)
-            # Per-patch mean subtraction keeps the generator focused on structure.
+            # Per-patch mean subtraction (over spatial dims, keep channel)
             xb_dm = (xb - xb.mean(dim=[2, 3, 4], keepdim=True)).contiguous()
             yb_dm = (yb - yb.mean(dim=[2, 3, 4], keepdim=True)).contiguous()
 
             fake_dm = net_G(xb_dm)
             fake_dm = (fake_dm - fake_dm.mean(dim=[2, 3, 4], keepdim=True)).contiguous()
 
-            if xb_dm.ndim != 5 or yb_dm.ndim != 5 or fake_dm.ndim != 5:
-                raise RuntimeError(
-                    f"Expected 5D tensors [B,C,D,H,W], got "
-                    f"xb={tuple(xb_dm.shape)}, yb={tuple(yb_dm.shape)}, fake={tuple(fake_dm.shape)}"
-                )
-            if xb_dm.shape != yb_dm.shape or xb_dm.shape != fake_dm.shape:
-                raise RuntimeError(
-                    f"Discriminator input shape mismatch: "
-                    f"xb={tuple(xb_dm.shape)}, yb={tuple(yb_dm.shape)}, fake={tuple(fake_dm.shape)}"
-                )
-            if xb_dm.shape[1] != 1:
-                raise RuntimeError(
-                    f"Expected single-channel IC/residual patches, got channel={xb_dm.shape[1]}"
-                )
-
-            def _switch_sn_impl_and_reset_d(err):
-                nonlocal net_D, opt_D, scheduler_D, sn_impl
-                if use_spectral_norm and 'CUBLAS_STATUS_INVALID_VALUE' in str(err):
-                    if sn_impl == 'cpu_power_iter':
-                        return False
-                    print('Detected CUBLAS_STATUS_INVALID_VALUE with native spectral norm; switching discriminator SN to cpu_power_iter and rebuilding D.')
-                    sn_impl = 'cpu_power_iter'
-                    net_D = nnmodel.PatchDiscriminator3D(
-                        in_channels=2,
-                        base_channels=32,
-                        n_layers=n_disc_layers,
-                        use_spectral_norm=True,
-                        spectral_norm_impl=sn_impl,
-                    ).to(device)
-                    opt_D = torch.optim.AdamW(net_D.parameters(), lr=lr_d, betas=(0.5, 0.999))
-                    scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        opt_D, T_max=epochs, eta_min=lr_d * 0.01)
-                    torch.cuda.empty_cache()
-                    return True
-                return False
-
-            # ── Train Discriminator (every d_update_interval batches) ─────────
+            # ── Train Discriminator ───────────────────────────────────────
             if batch_idx % d_update_interval == 0:
                 opt_D.zero_grad()
-                try:
-                    pred_real = net_D(xb_dm, yb_dm)
-                    pred_fake = net_D(xb_dm, fake_dm.detach())
-                except RuntimeError as e:
-                    if _switch_sn_impl_and_reset_d(e):
-                        pred_real = net_D(xb_dm, yb_dm)
-                        pred_fake = net_D(xb_dm, fake_dm.detach())
-                    else:
-                        raise
+                pred_real_list = _d_forward(xb_dm, yb_dm)
+                pred_fake_list = _d_forward(xb_dm, fake_dm.detach())
                 gp = _gradient_penalty(xb_dm, yb_dm, fake_dm.detach())
-                loss_D = pred_fake.mean() - pred_real.mean() + lambda_gp * gp
-                try:
-                    loss_D.backward()
-                    opt_D.step()
-                except RuntimeError as e:
-                    if _switch_sn_impl_and_reset_d(e):
-                        opt_D.zero_grad()
-                        pred_real = net_D(xb_dm, yb_dm)
-                        pred_fake = net_D(xb_dm, fake_dm.detach())
-                        gp = _gradient_penalty(xb_dm, yb_dm, fake_dm.detach())
-                        loss_D = pred_fake.mean() - pred_real.mean() + lambda_gp * gp
-                        loss_D.backward()
-                        opt_D.step()
-                    else:
-                        raise
+                n_d = len(pred_real_list)
+                loss_D = (
+                    sum(pf.mean() - pr.mean()
+                        for pf, pr in zip(pred_fake_list, pred_real_list)) / n_d
+                    + lambda_gp * gp
+                )
+                loss_D.backward()
+                opt_D.step()
             else:
                 loss_D = torch.tensor(0.0, device=device)
                 gp = torch.tensor(0.0, device=device)
 
-            # ── Train Generator ───────────────────────────────────────────────
+            # ── Train Generator ───────────────────────────────────────────
             opt_G.zero_grad()
             if lambda_fm > 0:
-                # Get real intermediate features without gradients
-                try:
-                    with torch.no_grad():
-                        _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
-                    pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
-                except RuntimeError as e:
-                    if _switch_sn_impl_and_reset_d(e):
-                        with torch.no_grad():
-                            _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
-                        pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
-                    else:
-                        raise
+                with torch.no_grad():
+                    _, feats_real = _d_forward_feats(xb_dm, yb_dm)
+                pred_fake_list, feats_fake = _d_forward_feats(xb_dm, fake_dm)
                 loss_fm = torch.stack([F.mse_loss(ff, fr)
                                        for ff, fr in zip(feats_fake, feats_real)]).mean()
             else:
-                try:
-                    pred_fake_G = net_D(xb_dm, fake_dm)
-                except RuntimeError as e:
-                    if _switch_sn_impl_and_reset_d(e):
-                        pred_fake_G = net_D(xb_dm, fake_dm)
-                    else:
-                        raise
+                pred_fake_list = _d_forward(xb_dm, fake_dm)
                 loss_fm = torch.tensor(0.0, device=device)
 
-            loss_adv   = -pred_fake_G.mean()
+            n_d = len(pred_fake_list)
+            loss_adv   = sum(-pf.mean() for pf in pred_fake_list) / n_d
             loss_pixel = criterion_pixel(fake_dm, yb_dm)
-            loss_G = loss_adv + lambda_pixel * loss_pixel + lambda_fm * loss_fm
-            try:
-                loss_G.backward()
-                opt_G.step()
-            except RuntimeError as e:
-                if _switch_sn_impl_and_reset_d(e):
-                    opt_G.zero_grad()
-                    if lambda_fm > 0:
-                        with torch.no_grad():
-                            _, feats_real = net_D(xb_dm, yb_dm, return_features=True)
-                        pred_fake_G, feats_fake = net_D(xb_dm, fake_dm, return_features=True)
-                        loss_fm = torch.stack([F.mse_loss(ff, fr)
-                                               for ff, fr in zip(feats_fake, feats_real)]).mean()
-                    else:
-                        pred_fake_G = net_D(xb_dm, fake_dm)
-                        loss_fm = torch.tensor(0.0, device=device)
-                    loss_adv   = -pred_fake_G.mean()
-                    loss_pixel = criterion_pixel(fake_dm, yb_dm)
-                    loss_G = loss_adv + lambda_pixel * loss_pixel + lambda_fm * loss_fm
-                    loss_G.backward()
-                    opt_G.step()
-                else:
-                    raise
+            loss_G = (loss_adv + lambda_pixel * loss_pixel +
+                      lambda_fm * loss_fm)
+            loss_G.backward()
+            opt_G.step()
 
             sum_G += loss_G.item() * xb.size(0)
             sum_D += loss_D.item() * xb.size(0)
@@ -312,11 +263,10 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
             )
 
         epoch_bar.close()
-
         scheduler_G.step()
         scheduler_D.step()
 
-        n = len(input_patches)
+        n = n_samples
         epoch_seconds = time.perf_counter() - epoch_start_time
         sum_epoch_seconds += epoch_seconds
         done_epochs = epoch - start_epoch + 1
@@ -348,7 +298,6 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
         if epochs >= 100 and (epoch + 1) % 100 == 0:
             torch.save(net_G.state_dict(), f'{save_file_name}-e{epoch+1}.pth')
 
-    # Save generator-only .pth for inference
     torch.save(net_G.state_dict(), f'{save_file_name}-e{epochs}.pth')
     total_train_seconds = time.perf_counter() - train_start_time
     print(f"Total training time: {total_train_seconds:.1f}s")

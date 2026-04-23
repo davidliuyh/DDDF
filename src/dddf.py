@@ -13,8 +13,28 @@ class DDDF:
     real_dtype = np.float32
     complex_dtype = np.complex64
 
-    def __init__(self, zi, zf, Omega_m, thread=16):
-        self.growth_factor_D = self.linear_growth_factor(Omega_m, zf) / self.linear_growth_factor(Omega_m, zi)
+    def __init__(self, zi, zf=None, Omega_m=None, thread=16):
+        """Initialize DDDF in either standard or WN mode.
+
+        Standard mode:
+            DDDF(zi, zf, Omega_m, thread)
+            -> growth_factor_D = D(zf) / D(zi)
+
+        WN mode:
+            DDDF(Omega_m, thread)
+            -> growth_factor_D = 1.0
+               (the growth scaling is expected to be handled in get_snapshot_wn)
+        """
+        if Omega_m is None:
+            Omega_m = float(zi)
+            if zf is not None:
+                thread = int(zf)
+            self.growth_factor_D = 1.0
+        else:
+            self.growth_factor_D = (
+                self.linear_growth_factor(Omega_m, zf)
+                / self.linear_growth_factor(Omega_m, zi)
+            )
         self.threads = thread
 
     class Veck:
@@ -88,6 +108,72 @@ class DDDF:
         delta = delta / np.mean(delta) - 1.0
 
         return dict(pos=pos, ids=ids, delta=delta)  # return pos with shape(3,N)
+
+    def get_snapshot_wn(self, psi1_path, qinit_path, boxsize, grid_size):
+        """Load white-noise psi1 and q_init, return q_init, ids, and delta(z=0)."""
+        psi1_path = str(psi1_path)
+        qinit_path = str(qinit_path)
+        print(f'Loading psi1 from {psi1_path}')
+        print(f'Loading q_init from {qinit_path}')
+
+        psi = np.load(psi1_path)
+        psi1_x = psi['psi1_x'].astype(np.float32)
+        psi1_y = psi['psi1_y'].astype(np.float32)
+        psi1_z = psi['psi1_z'].astype(np.float32)
+        dplus = float(np.asarray(psi['dplus']).ravel()[0])
+        box_file = float(np.asarray(psi['box']).ravel()[0])
+
+        qd = np.load(qinit_path)
+        q_init = qd['q_init'].astype(np.float32)
+        ids = np.arange(q_init.shape[0], dtype=np.int64)
+
+        N = psi1_x.shape[0]
+        print(f'psi1 grid: {N}^3, dplus={dplus:.6f}, box_file={box_file} (kpc/h)')
+
+        # Convert q_init from kpc/h to Mpc/h (pipeline convention)
+        q_init = q_init / 1.0e3
+
+        # delta(z=0) = -div(dplus * psi1)
+        dx_kpc = box_file / N
+        kx = 2.0 * np.pi * np.fft.fftfreq(N, d=dx_kpc)
+        ky = kx.copy()
+        kz = kx.copy()
+        kx3, ky3, kz3 = np.meshgrid(kx, ky, kz, indexing='ij')
+
+        pyfftw.interfaces.cache.enable()
+        pyfftw.interfaces.cache.set_keepalive_time(30)
+
+        fft_psi1_x = pyfftw.builders.fftn(dplus * psi1_x, threads=self.threads)()
+        fft_psi1_y = pyfftw.builders.fftn(dplus * psi1_y, threads=self.threads)()
+        fft_psi1_z = pyfftw.builders.fftn(dplus * psi1_z, threads=self.threads)()
+
+        div_k = 1.0j * (kx3 * fft_psi1_x + ky3 * fft_psi1_y + kz3 * fft_psi1_z)
+        delta = -pyfftw.builders.ifftn(div_k, threads=self.threads)().real.astype(self.real_dtype)
+
+        print(f'delta(z=0): mean={delta.mean():.6e}, std={delta.std():.6f}')
+
+        return dict(q_init=q_init, ids=ids, delta=delta)
+
+    def compute_target_psi_div_wn(self, q_init, final_pos, N_p, boxsize, veck_main):
+        """Compute target divergence of displacement from q_init to final_pos."""
+        par_disp = np.asarray(final_pos - q_init, dtype=self.real_dtype)
+        par_disp = np.where(par_disp < -boxsize / 2, par_disp + boxsize, par_disp)
+        par_disp = np.where(par_disp > boxsize / 2, par_disp - boxsize, par_disp)
+
+        disp_field = np.zeros((N_p, N_p, N_p, 3), dtype=self.real_dtype)
+        self.disp_from_par(disp_field, q_init, par_disp, N_p, boxsize)
+        return self.divergence(disp_field, veck_main)
+
+    def compute_target_psi_wn(self, q_init, final_pos, N_p, boxsize, veck_main):
+        """Compute both target ∇·Ψ and full displacement field Ψ."""
+        par_disp = np.asarray(final_pos - q_init, dtype=self.real_dtype)
+        par_disp = np.where(par_disp < -boxsize / 2, par_disp + boxsize, par_disp)
+        par_disp = np.where(par_disp > boxsize / 2, par_disp - boxsize, par_disp)
+
+        disp_field = np.zeros((N_p, N_p, N_p, 3), dtype=self.real_dtype)
+        self.disp_from_par(disp_field, q_init, par_disp, N_p, boxsize)
+        psi_div = self.divergence(disp_field, veck_main)
+        return psi_div, disp_field
 
     def divergence(self, x_field: np.typing.NDArray, veck: Veck) -> np.typing.NDArray:
         assert x_field.shape == veck.vec_k.shape
