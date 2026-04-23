@@ -79,7 +79,6 @@ gan_n_disc_layers     = 3
 gan_lambda_fm         = 20.0
 gan_lambda_gp         = 10.0
 gan_d_update_interval = 3
-gan_use_spectral_norm = False
 
 # ── Inference hyperparameters ─────────────────────────────────────────────────
 infer_patch_size  = 20
@@ -193,7 +192,6 @@ vec_gan_v1 = {
     'gan_lambda_fm': 20.0,
     'gan_lambda_gp': 10.0,
     'gan_d_update_interval': 3,
-    'gan_use_spectral_norm': False,
 }
 
 vec_gan_v2 = {
@@ -210,7 +208,6 @@ vec_gan_v2 = {
     'gan_lambda_fm': 20.0,
     'gan_lambda_gp': 10.0,
     'gan_d_update_interval': 3,
-    'gan_use_spectral_norm': False,
     'gan_use_multiscale_disc': False,
     'gan_disc_base_channels': 32,
 }
@@ -229,7 +226,6 @@ vec_gan_v3 = {
     'gan_lambda_fm': 20.0,
     'gan_lambda_gp': 10.0,
     'gan_d_update_interval': 1,
-    'gan_use_spectral_norm': False,
     'gan_use_multiscale_disc': True,
     'gan_disc_base_channels': 64,
 }
@@ -252,7 +248,6 @@ gan_n_disc_layers     = active_vec_gan_defaults['gan_n_disc_layers']
 gan_lambda_fm         = active_vec_gan_defaults['gan_lambda_fm']
 gan_lambda_gp         = active_vec_gan_defaults['gan_lambda_gp']
 gan_d_update_interval = active_vec_gan_defaults['gan_d_update_interval']
-gan_use_spectral_norm = active_vec_gan_defaults['gan_use_spectral_norm']
 gan_use_multiscale_disc = active_vec_gan_defaults['gan_use_multiscale_disc']
 gan_disc_base_channels  = active_vec_gan_defaults['gan_disc_base_channels']
 infer_epochs          = epochs

@@ -19,7 +19,7 @@ from tqdm.auto import tqdm
 
 def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
               lr_g=1e-4, lr_d=1e-4, lambda_pixel=10.0, n_disc_layers=3,
-              lambda_fm=10.0, d_update_interval=2, use_spectral_norm=True,
+              lambda_fm=10.0, d_update_interval=2,
               checkpoint_interval=10, resume_checkpoint=None, overwrite=False,
               lambda_gp=10.0, use_multiscale_disc=False, disc_base_channels=32):
     """Conditional GAN training with WGAN-GP for multi-channel fields.
@@ -81,22 +81,17 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
     ).to(device)
 
     disc_in_channels = 2 * n_channels  # condition + prediction
-    sn_impl = 'native'
     if use_multiscale_disc:
         net_D = nnmodel.MultiScaleDiscriminator3D(
             in_channels=disc_in_channels,
             base_channels=disc_base_channels,
             n_layers_coarse=n_disc_layers,
-            use_spectral_norm=use_spectral_norm,
-            spectral_norm_impl=sn_impl,
         ).to(device)
     else:
         net_D = nnmodel.PatchDiscriminator3D(
             in_channels=disc_in_channels,
             base_channels=disc_base_channels,
             n_layers=n_disc_layers,
-            use_spectral_norm=use_spectral_norm,
-            spectral_norm_impl=sn_impl,
         ).to(device)
 
     total_G = sum(p.numel() for p in net_G.parameters())
@@ -106,7 +101,7 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
     print(f"n_channels={n_channels}, lambda_pixel={lambda_pixel}, lambda_fm={lambda_fm}, "
           f"n_disc_layers={n_disc_layers}, "
           f"d_update_interval={d_update_interval}, "
-          f"use_spectral_norm={use_spectral_norm}, sn_impl={sn_impl}, batch_size={batch_size}, "
+            f"batch_size={batch_size}, "
             f"use_multiscale_disc={use_multiscale_disc}, disc_base_channels={disc_base_channels}")
 
     opt_G = torch.optim.AdamW(net_G.parameters(), lr=lr_g, betas=(0.5, 0.999))
@@ -213,45 +208,11 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
             fake_dm = net_G(xb_dm)
             fake_dm = (fake_dm - fake_dm.mean(dim=[2, 3, 4], keepdim=True)).contiguous()
 
-            def _switch_sn_impl_and_reset_d(err):
-                nonlocal net_D, opt_D, scheduler_D, sn_impl
-                if use_spectral_norm and 'CUBLAS_STATUS_INVALID_VALUE' in str(err):
-                    if sn_impl == 'cpu_power_iter':
-                        return False
-                    print('Switching discriminator SN to cpu_power_iter...')
-                    sn_impl = 'cpu_power_iter'
-                    if use_multiscale_disc:
-                        net_D = nnmodel.MultiScaleDiscriminator3D(
-                            in_channels=disc_in_channels,
-                            base_channels=disc_base_channels,
-                            n_layers_coarse=n_disc_layers,
-                            use_spectral_norm=True, spectral_norm_impl=sn_impl,
-                        ).to(device)
-                    else:
-                        net_D = nnmodel.PatchDiscriminator3D(
-                            in_channels=disc_in_channels,
-                            base_channels=disc_base_channels, n_layers=n_disc_layers,
-                            use_spectral_norm=True, spectral_norm_impl=sn_impl,
-                        ).to(device)
-                    opt_D = torch.optim.AdamW(net_D.parameters(), lr=lr_d, betas=(0.5, 0.999))
-                    scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        opt_D, T_max=epochs, eta_min=lr_d * 0.01)
-                    torch.cuda.empty_cache()
-                    return True
-                return False
-
             # ── Train Discriminator ───────────────────────────────────────
             if batch_idx % d_update_interval == 0:
                 opt_D.zero_grad()
-                try:
-                    pred_real_list = _d_forward(xb_dm, yb_dm)
-                    pred_fake_list = _d_forward(xb_dm, fake_dm.detach())
-                except RuntimeError as e:
-                    if _switch_sn_impl_and_reset_d(e):
-                        pred_real_list = _d_forward(xb_dm, yb_dm)
-                        pred_fake_list = _d_forward(xb_dm, fake_dm.detach())
-                    else:
-                        raise
+                pred_real_list = _d_forward(xb_dm, yb_dm)
+                pred_fake_list = _d_forward(xb_dm, fake_dm.detach())
                 gp = _gradient_penalty(xb_dm, yb_dm, fake_dm.detach())
                 n_d = len(pred_real_list)
                 loss_D = (
@@ -259,25 +220,8 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
                         for pf, pr in zip(pred_fake_list, pred_real_list)) / n_d
                     + lambda_gp * gp
                 )
-                try:
-                    loss_D.backward()
-                    opt_D.step()
-                except RuntimeError as e:
-                    if _switch_sn_impl_and_reset_d(e):
-                        opt_D.zero_grad()
-                        pred_real_list = _d_forward(xb_dm, yb_dm)
-                        pred_fake_list = _d_forward(xb_dm, fake_dm.detach())
-                        gp = _gradient_penalty(xb_dm, yb_dm, fake_dm.detach())
-                        n_d = len(pred_real_list)
-                        loss_D = (
-                            sum(pf.mean() - pr.mean()
-                                for pf, pr in zip(pred_fake_list, pred_real_list)) / n_d
-                            + lambda_gp * gp
-                        )
-                        loss_D.backward()
-                        opt_D.step()
-                    else:
-                        raise
+                loss_D.backward()
+                opt_D.step()
             else:
                 loss_D = torch.tensor(0.0, device=device)
                 gp = torch.tensor(0.0, device=device)
@@ -285,27 +229,13 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
             # ── Train Generator ───────────────────────────────────────────
             opt_G.zero_grad()
             if lambda_fm > 0:
-                try:
-                    with torch.no_grad():
-                        _, feats_real = _d_forward_feats(xb_dm, yb_dm)
-                    pred_fake_list, feats_fake = _d_forward_feats(xb_dm, fake_dm)
-                except RuntimeError as e:
-                    if _switch_sn_impl_and_reset_d(e):
-                        with torch.no_grad():
-                            _, feats_real = _d_forward_feats(xb_dm, yb_dm)
-                        pred_fake_list, feats_fake = _d_forward_feats(xb_dm, fake_dm)
-                    else:
-                        raise
+                with torch.no_grad():
+                    _, feats_real = _d_forward_feats(xb_dm, yb_dm)
+                pred_fake_list, feats_fake = _d_forward_feats(xb_dm, fake_dm)
                 loss_fm = torch.stack([F.mse_loss(ff, fr)
                                        for ff, fr in zip(feats_fake, feats_real)]).mean()
             else:
-                try:
-                    pred_fake_list = _d_forward(xb_dm, fake_dm)
-                except RuntimeError as e:
-                    if _switch_sn_impl_and_reset_d(e):
-                        pred_fake_list = _d_forward(xb_dm, fake_dm)
-                    else:
-                        raise
+                pred_fake_list = _d_forward(xb_dm, fake_dm)
                 loss_fm = torch.tensor(0.0, device=device)
 
             n_d = len(pred_fake_list)
@@ -313,30 +243,8 @@ def train_gan(training_data_path, save_file_name, batch_size=64, epochs=50,
             loss_pixel = criterion_pixel(fake_dm, yb_dm)
             loss_G = (loss_adv + lambda_pixel * loss_pixel +
                       lambda_fm * loss_fm)
-            try:
-                loss_G.backward()
-                opt_G.step()
-            except RuntimeError as e:
-                if _switch_sn_impl_and_reset_d(e):
-                    opt_G.zero_grad()
-                    if lambda_fm > 0:
-                        with torch.no_grad():
-                            _, feats_real = _d_forward_feats(xb_dm, yb_dm)
-                        pred_fake_list, feats_fake = _d_forward_feats(xb_dm, fake_dm)
-                        loss_fm = torch.stack([F.mse_loss(ff, fr)
-                                               for ff, fr in zip(feats_fake, feats_real)]).mean()
-                    else:
-                        pred_fake_list = _d_forward(xb_dm, fake_dm)
-                        loss_fm = torch.tensor(0.0, device=device)
-                    n_d = len(pred_fake_list)
-                    loss_adv   = sum(-pf.mean() for pf in pred_fake_list) / n_d
-                    loss_pixel = criterion_pixel(fake_dm, yb_dm)
-                    loss_G = (loss_adv + lambda_pixel * loss_pixel +
-                              lambda_fm * loss_fm)
-                    loss_G.backward()
-                    opt_G.step()
-                else:
-                    raise
+            loss_G.backward()
+            opt_G.step()
 
             sum_G += loss_G.item() * xb.size(0)
             sum_D += loss_D.item() * xb.size(0)
