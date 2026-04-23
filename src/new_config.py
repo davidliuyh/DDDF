@@ -84,7 +84,8 @@ gan_use_spectral_norm = False
 # ── Inference hyperparameters ─────────────────────────────────────────────────
 infer_patch_size  = 20
 infer_padding     = 2
-infer_overlap     = 0.25
+infer_overlap     = 0.0
+infer_batch_size  = 16
 infer_epochs      = epochs   # default: use the training epochs
 infer_checkpoint  = None     # None → auto-derive from training model_name + infer_epochs
 
@@ -267,3 +268,50 @@ def vec_gan_model_name(realizations, ps=patch_size, p=padding,
                        rot=vec_rotate, N_p=N_p):
     rtag = realization_tag(realizations)
     return f'{model_path}/{vec_model_dir}/gan-VEC-N{N_p}PS{ps}P{p}Rotate{rot}-{rtag}'
+
+
+# ── HR (fiducial 512³) residual training pipeline ────────────────────────────
+
+N_p_HR = 512
+
+hr_vec_gan_v1 = {
+    'hr_vec_data_dir': 'hr_psi_vec',
+    'hr_vec_model_dir': 'hr_psi_vec_v1',
+    'hr_vec_batch_size': 512,
+    'hr_vec_rotate': False,
+    'hr_vec_unet_base_channels': 32,
+    'epochs': 60,
+    'gan_lambda_pixel': 5.0,
+    'gan_lr_g': 1e-4,
+    'gan_lr_d': 1e-4,
+    'gan_n_disc_layers': 3,
+    'gan_lambda_fm': 20.0,
+    'gan_lambda_gp': 10.0,
+    'gan_d_update_interval': 1,
+    'gan_use_spectral_norm': False,
+    'gan_use_multiscale_disc': True,
+    'gan_disc_base_channels': 64,
+}
+
+active_hr_vec_gan_defaults = hr_vec_gan_v1
+
+hr_vec_data_dir  = active_hr_vec_gan_defaults['hr_vec_data_dir']
+hr_vec_model_dir = active_hr_vec_gan_defaults['hr_vec_model_dir']
+hr_vec_batch_size = active_hr_vec_gan_defaults['hr_vec_batch_size']
+hr_vec_rotate     = active_hr_vec_gan_defaults['hr_vec_rotate']
+hr_vec_unet_base_channels = active_hr_vec_gan_defaults['hr_vec_unet_base_channels']
+hr_epochs         = active_hr_vec_gan_defaults['epochs']
+
+ensure_filter_dirs(hr_vec_data_dir, hr_vec_model_dir)
+
+
+def hr_vec_training_data_path(realizations, ps=patch_size, p=padding, ov=overlap,
+                              rot=hr_vec_rotate, N_p_hr=N_p_HR):
+    tag = f'HRVEC-N{N_p}to{N_p_hr}PS{ps}P{p}O{int(100 * ov):02d}Rotate{rot}-{realization_tag(realizations)}'
+    return f'{data_path}/{hr_vec_data_dir}/training-data-{tag}.npz'
+
+
+def hr_vec_gan_model_name(realizations, ps=patch_size, p=padding,
+                          rot=hr_vec_rotate, N_p_hr=N_p_HR):
+    rtag = realization_tag(realizations)
+    return f'{model_path}/{hr_vec_model_dir}/gan-HRVEC-N{N_p}to{N_p_hr}PS{ps}P{p}Rotate{rot}-{rtag}'

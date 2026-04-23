@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 
-def apply_model_to_field(field, model, patch_size, pad, overlap, device=None):
+def apply_model_to_field(field, model, patch_size, pad, overlap, device=None, batch_size=8):
     """Apply a trained model to every patch of a periodic 3D or 4D field.
 
     Parameters
@@ -45,45 +45,71 @@ def apply_model_to_field(field, model, patch_size, pad, overlap, device=None):
     model.eval()
     t0 = time.time()
 
+    grid = range(0, N, step)
+    total_patches = len(grid) ** 3
+
+    def flush_batch(patch_tensors, patch_meta):
+        if not patch_tensors:
+            return
+
+        inp = torch.stack(patch_tensors, dim=0).float().to(device, non_blocking=True)
+        pred = model(inp).cpu().numpy()
+
+        for i, (z, y, x, cz, cy, cx) in enumerate(patch_meta):
+            if is_vector:
+                # (B, C, D, H, W) -> (D, H, W, C)
+                pred_i = pred[i].transpose(1, 2, 3, 0)
+            else:
+                # (B, 1, D, H, W) -> (D, H, W)
+                pred_i = pred[i, 0]
+
+            crop = pred_i[
+                pad:pad + patch_size,
+                pad:pad + patch_size,
+                pad:pad + patch_size,
+            ]
+
+            output[z:z + cz, y:y + cy, x:x + cx] += crop[:cz, :cy, :cx]
+            weight[z:z + cz, y:y + cy, x:x + cx] += 1
+
     with torch.no_grad():
-        for z in tqdm(range(0, N, step), desc='apply_model (z-slices)'):
-            for y in range(0, N, step):
-                for x in range(0, N, step):
-                    zs = np.arange(z - pad, z + patch_size + pad) % N
-                    ys = np.arange(y - pad, y + patch_size + pad) % N
-                    xs = np.arange(x - pad, x + patch_size + pad) % N
+        patch_tensors = []
+        patch_meta = []
 
-                    block = field[np.ix_(zs, ys, xs)] if not is_vector else field[np.ix_(zs, ys, xs)]
+        with tqdm(total=total_patches, desc='apply_model (patch-batch)') as pbar:
+            for z in grid:
+                for y in grid:
+                    for x in grid:
+                        zs = np.arange(z - pad, z + patch_size + pad) % N
+                        ys = np.arange(y - pad, y + patch_size + pad) % N
+                        xs = np.arange(x - pad, x + patch_size + pad) % N
 
-                    if is_vector:
-                        # (ps+2*pad, ps+2*pad, ps+2*pad, C) → (1, C, D, H, W)
-                        inp = torch.from_numpy(block).permute(3, 0, 1, 2).unsqueeze(0).float().to(device)
-                    else:
-                        # (ps+2*pad,)^3 → (1, 1, D, H, W)
-                        inp = torch.from_numpy(block).unsqueeze(0).unsqueeze(0).float().to(device)
+                        block = field[np.ix_(zs, ys, xs)]
 
-                    pred = model(inp).cpu().numpy()
+                        if is_vector:
+                            # (D, H, W, C) -> (C, D, H, W)
+                            inp = torch.from_numpy(block).permute(3, 0, 1, 2)
+                        else:
+                            # (D, H, W) -> (1, D, H, W)
+                            inp = torch.from_numpy(block).unsqueeze(0)
 
-                    if is_vector:
-                        # (1, C, D, H, W) → (D, H, W, C)
-                        pred = pred[0].transpose(1, 2, 3, 0)
-                    else:
-                        pred = pred.squeeze()
+                        z_end = min(z + patch_size, N)
+                        y_end = min(y + patch_size, N)
+                        x_end = min(x + patch_size, N)
+                        cz, cy, cx = z_end - z, y_end - y, x_end - x
 
-                    crop = pred[pad:pad + patch_size,
-                                pad:pad + patch_size,
-                                pad:pad + patch_size]
+                        patch_tensors.append(inp)
+                        patch_meta.append((z, y, x, cz, cy, cx))
 
-                    z_end = min(z + patch_size, N)
-                    y_end = min(y + patch_size, N)
-                    x_end = min(x + patch_size, N)
-                    cz, cy, cx = z_end - z, y_end - y, x_end - x
+                        if len(patch_tensors) >= batch_size:
+                            flush_batch(patch_tensors, patch_meta)
+                            pbar.update(len(patch_tensors))
+                            patch_tensors.clear()
+                            patch_meta.clear()
 
-                    if is_vector:
-                        output[z:z_end, y:y_end, x:x_end] += crop[:cz, :cy, :cx]
-                    else:
-                        output[z:z_end, y:y_end, x:x_end] += crop[:cz, :cy, :cx]
-                    weight[z:z_end, y:y_end, x:x_end] += 1
+            if patch_tensors:
+                flush_batch(patch_tensors, patch_meta)
+                pbar.update(len(patch_tensors))
 
     if is_vector:
         w = weight[..., np.newaxis]
@@ -92,5 +118,8 @@ def apply_model_to_field(field, model, patch_size, pad, overlap, device=None):
         output = np.where(weight > 0, output / weight, 0.0).astype(field.dtype)
 
     elapsed = time.time() - t0
-    print(f'apply_model done: step={step}, elapsed={elapsed:.1f}s')
+    print(
+        f'apply_model done: step={step}, overlap={overlap}, '
+        f'batch_size={batch_size}, elapsed={elapsed:.1f}s'
+    )
     return output

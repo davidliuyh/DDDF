@@ -9,6 +9,7 @@ curl/vorticity information lost in the Helmholtz decomposition.
 import gc
 import os
 import numpy as np
+import pyfftw
 import MAS_library as MASL
 import torch
 import new_config as cfg
@@ -75,6 +76,122 @@ def highpass_vector_field(field, k_cut, boxsize, width=None):
     for i in range(field.shape[-1]):
         out[..., i] = _hp_scalar(field[..., i], k_cut, boxsize, width=width)
     return out
+
+
+# ── Fourier-space resolution transfer ─────────────────────────────────────────
+
+def _fourier_upsample_3d(field_3d, target_N, threads=32):
+    """Upsample a single 3D scalar field via FFT zero-padding.
+
+    FFT → fftshift (center DC) → zero-pad symmetrically → ifftshift → IFFT.
+    Scales by (target_N / N)³ to preserve the physical amplitude.
+
+    Parameters
+    ----------
+    field_3d : ndarray, shape (N, N, N)
+    target_N : int  (must be > N, both even)
+    threads  : int
+
+    Returns
+    -------
+    ndarray, shape (target_N, target_N, target_N), same dtype as input
+    """
+    N = field_3d.shape[0]
+    assert target_N > N and target_N % 2 == 0 and N % 2 == 0
+
+    fk = pyfftw.builders.fftn(field_3d, threads=threads)()
+    fk_shifted = np.fft.fftshift(fk)
+
+    pad_each = (target_N - N) // 2
+    fk_padded = np.pad(fk_shifted, pad_each, mode='constant', constant_values=0)
+
+    fk_out = np.fft.ifftshift(fk_padded)
+    scale = (target_N / N) ** 3
+    result = pyfftw.builders.ifftn(fk_out * scale, threads=threads)().real
+    return result.astype(field_3d.dtype)
+
+
+def _fourier_downsample_3d(field_3d, target_N, threads=32):
+    """Downsample a single 3D scalar field via FFT truncation.
+
+    FFT → fftshift (center DC) → crop symmetrically → ifftshift → IFFT.
+    Scales by (target_N / N)³ to preserve the physical amplitude.
+
+    Parameters
+    ----------
+    field_3d : ndarray, shape (N, N, N)
+    target_N : int  (must be < N, both even)
+    threads  : int
+
+    Returns
+    -------
+    ndarray, shape (target_N, target_N, target_N), same dtype as input
+    """
+    N = field_3d.shape[0]
+    assert target_N < N and target_N % 2 == 0 and N % 2 == 0
+
+    fk = pyfftw.builders.fftn(field_3d, threads=threads)()
+    fk_shifted = np.fft.fftshift(fk)
+
+    crop = (N - target_N) // 2
+    fk_cropped = fk_shifted[crop:crop + target_N,
+                            crop:crop + target_N,
+                            crop:crop + target_N]
+
+    fk_out = np.fft.ifftshift(fk_cropped)
+    scale = (target_N / N) ** 3
+    result = pyfftw.builders.ifftn(fk_out * scale, threads=threads)().real
+    return result.astype(field_3d.dtype)
+
+
+def fourier_upsample_field(field, target_N, threads=32):
+    """Upsample a 3D scalar or 4D vector field via FFT zero-padding.
+
+    Parameters
+    ----------
+    field : ndarray, shape (N, N, N) or (N, N, N, C)
+    target_N : int
+    threads : int
+
+    Returns
+    -------
+    ndarray, shape (target_N,)*3 or (target_N,)*3 + (C,)
+    """
+    if field.ndim == 3:
+        return _fourier_upsample_3d(field, target_N, threads)
+    elif field.ndim == 4:
+        C = field.shape[-1]
+        out = np.empty((target_N, target_N, target_N, C), dtype=field.dtype)
+        for i in range(C):
+            out[..., i] = _fourier_upsample_3d(field[..., i], target_N, threads)
+        return out
+    else:
+        raise ValueError(f'Expected 3D or 4D field, got {field.ndim}D')
+
+
+def fourier_downsample_field(field, target_N, threads=32):
+    """Downsample a 3D scalar or 4D vector field via FFT truncation.
+
+    Parameters
+    ----------
+    field : ndarray, shape (N, N, N) or (N, N, N, C)
+    target_N : int
+    threads : int
+
+    Returns
+    -------
+    ndarray, shape (target_N,)*3 or (target_N,)*3 + (C,)
+    """
+    if field.ndim == 3:
+        return _fourier_downsample_3d(field, target_N, threads)
+    elif field.ndim == 4:
+        C = field.shape[-1]
+        out = np.empty((target_N, target_N, target_N, C), dtype=field.dtype)
+        for i in range(C):
+            out[..., i] = _fourier_downsample_3d(field[..., i], target_N, threads)
+        return out
+    else:
+        raise ValueError(f'Expected 3D or 4D field, got {field.ndim}D')
 
 
 # ── Best-fit pipeline (extended to return vector psi) ─────────────────────────
