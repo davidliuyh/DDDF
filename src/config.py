@@ -214,7 +214,7 @@ vec_gan_v3 = {
     'vec_batch_size': 512,
     'vec_rotate': False,
     'vec_unet_base_channels': 32,
-    'epochs': 350,
+    'epochs': 300,
     'gan_lambda_pixel': 5.0,
     'gan_lr_g': 1e-4,
     'gan_lr_d': 1e-4,

@@ -25,6 +25,79 @@ def _infer_num_pools(state_dict):
     return max(num_pools, 1)
 
 
+def _is_torch_state_dict(obj):
+    return isinstance(obj, dict) and any(torch.is_tensor(v) for v in obj.values())
+
+
+def _normalize_state_dict_keys(state_dict):
+    if any(k.startswith("module.") for k in state_dict):
+        return {
+            (k[len("module."):] if k.startswith("module.") else k): v
+            for k, v in state_dict.items()
+        }
+    return state_dict
+
+
+def _extract_generator_state(checkpoint_obj):
+    if _is_torch_state_dict(checkpoint_obj):
+        return _normalize_state_dict_keys(checkpoint_obj)
+
+    if isinstance(checkpoint_obj, dict):
+        if _is_torch_state_dict(checkpoint_obj.get("net_G_state")):
+            return _normalize_state_dict_keys(checkpoint_obj["net_G_state"])
+
+        state_dict = checkpoint_obj.get("state_dict")
+        if _is_torch_state_dict(state_dict):
+            if any(k.startswith("net_G.") for k in state_dict):
+                state_dict = {
+                    k[len("net_G."):]: v
+                    for k, v in state_dict.items()
+                    if k.startswith("net_G.")
+                }
+            return _normalize_state_dict_keys(state_dict)
+
+    raise ValueError("Unsupported checkpoint format: cannot extract generator state dict.")
+
+
+def _export_generator_pth_from_ckpt(ckpt_path, pth_path):
+    checkpoint_obj = torch.load(ckpt_path, map_location="cpu")
+    state_dict = _extract_generator_state(checkpoint_obj)
+    os.makedirs(os.path.dirname(pth_path) or ".", exist_ok=True)
+    torch.save(state_dict, pth_path)
+    print(f"Auto-generated .pth from .ckpt: {ckpt_path} -> {pth_path}")
+    return pth_path
+
+
+def _resolve_or_export_checkpoint(path):
+    base, ext = os.path.splitext(path)
+
+    if ext == ".ckpt":
+        pth_path = f"{base}.pth"
+        if os.path.exists(pth_path):
+            return pth_path
+        if os.path.exists(path):
+            return _export_generator_pth_from_ckpt(path, pth_path)
+        return None
+
+    if os.path.exists(path):
+        return path
+
+    if ext == ".pth":
+        ckpt_path = f"{base}.ckpt"
+        if os.path.exists(ckpt_path):
+            return _export_generator_pth_from_ckpt(ckpt_path, path)
+        return None
+
+    pth_path = f"{path}.pth"
+    if os.path.exists(pth_path):
+        return pth_path
+
+    ckpt_path = f"{path}.ckpt"
+    if os.path.exists(ckpt_path):
+        return _export_generator_pth_from_ckpt(ckpt_path, pth_path)
+    return None
+
+
 def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=None):
     infer_train_realizations = (
         cfg.train_realizations if infer_train_realizations is None else infer_train_realizations
@@ -34,14 +107,15 @@ def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=
     if model is not None:
         base = str(model)
         candidates = [base]
-        if not base.endswith(".pth"):
+        if not base.endswith((".pth", ".ckpt")):
             candidates.append(f"{base}.pth")
             candidates.append(f"{base}-e{infer_epochs}.pth")
         for path in candidates:
-            if os.path.exists(path):
-                return path
+            resolved = _resolve_or_export_checkpoint(path)
+            if resolved is not None:
+                return resolved
         raise FileNotFoundError(
-            "Model checkpoint not found. Tried: " + ", ".join(candidates)
+            "Model checkpoint not found (.pth/.ckpt). Tried: " + ", ".join(candidates)
         )
 
     if cfg.infer_checkpoint is not None:
@@ -56,13 +130,15 @@ def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=
         )
         checkpoint_path = f"{auto_model}-e{infer_epochs}.pth"
 
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Model checkpoint not found: {checkpoint_path}")
-    return checkpoint_path
+    resolved = _resolve_or_export_checkpoint(str(checkpoint_path))
+    if resolved is None:
+        raise FileNotFoundError(f"Model checkpoint not found (.pth/.ckpt): {checkpoint_path}")
+    return resolved
 
 
 def _load_model(checkpoint_path, device):
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint_obj = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = _extract_generator_state(checkpoint_obj)
     num_pools = _infer_num_pools(state_dict)
     # Infer channels from the first conv layer weight shape
     inc_key = 'inc.double_conv.0.weight'
