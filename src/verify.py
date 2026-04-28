@@ -1,162 +1,30 @@
-"""Verification helpers for the vector-Ψ WN IC2RES pipeline."""
+"""Verification helpers for the vector-psi WN IC2RES pipeline."""
 
-import os
 import importlib
+import os
 
-import numpy as np
 import matplotlib.pyplot as plt
-import torch
+import numpy as np
 import Pk_library as PKL
 
-import model.model as nnmodel
 import config as cfg
 from dddf import DDDF
-from pipeline import (
-    psi_to_delta,
-    psi_div_to_delta,
-    compute_baseline,
-    highpass_vector_field,
-)
-from inference import apply_model_to_field
+from inference import _infer_num_pools as _infer_num_pools_impl
+from inference import _load_model as _load_model_impl
+from inference import _resolve_checkpoint
+from inference import infer_final_psi_from_seed
+from inference import _prepare_seed_products
+from pipeline import compute_baseline, psi_to_delta
 
 
 def _infer_num_pools(state_dict):
-    num_pools = len({int(k.split(".")[1]) for k in state_dict if k.startswith("downs.")})
-    return max(num_pools, 1)
-
-
-def _is_torch_state_dict(obj):
-    return isinstance(obj, dict) and any(torch.is_tensor(v) for v in obj.values())
-
-
-def _normalize_state_dict_keys(state_dict):
-    if any(k.startswith("module.") for k in state_dict):
-        return {
-            (k[len("module."):] if k.startswith("module.") else k): v
-            for k, v in state_dict.items()
-        }
-    return state_dict
-
-
-def _extract_generator_state(checkpoint_obj):
-    if _is_torch_state_dict(checkpoint_obj):
-        return _normalize_state_dict_keys(checkpoint_obj)
-
-    if isinstance(checkpoint_obj, dict):
-        if _is_torch_state_dict(checkpoint_obj.get("net_G_state")):
-            return _normalize_state_dict_keys(checkpoint_obj["net_G_state"])
-
-        state_dict = checkpoint_obj.get("state_dict")
-        if _is_torch_state_dict(state_dict):
-            if any(k.startswith("net_G.") for k in state_dict):
-                state_dict = {
-                    k[len("net_G."):]: v
-                    for k, v in state_dict.items()
-                    if k.startswith("net_G.")
-                }
-            return _normalize_state_dict_keys(state_dict)
-
-    raise ValueError("Unsupported checkpoint format: cannot extract generator state dict.")
-
-
-def _export_generator_pth_from_ckpt(ckpt_path, pth_path):
-    checkpoint_obj = torch.load(ckpt_path, map_location="cpu")
-    state_dict = _extract_generator_state(checkpoint_obj)
-    os.makedirs(os.path.dirname(pth_path) or ".", exist_ok=True)
-    torch.save(state_dict, pth_path)
-    print(f"Auto-generated .pth from .ckpt: {ckpt_path} -> {pth_path}")
-    return pth_path
-
-
-def _resolve_or_export_checkpoint(path):
-    base, ext = os.path.splitext(path)
-
-    if ext == ".ckpt":
-        pth_path = f"{base}.pth"
-        if os.path.exists(pth_path):
-            return pth_path
-        if os.path.exists(path):
-            return _export_generator_pth_from_ckpt(path, pth_path)
-        return None
-
-    if os.path.exists(path):
-        return path
-
-    if ext == ".pth":
-        ckpt_path = f"{base}.ckpt"
-        if os.path.exists(ckpt_path):
-            return _export_generator_pth_from_ckpt(ckpt_path, path)
-        return None
-
-    pth_path = f"{path}.pth"
-    if os.path.exists(pth_path):
-        return pth_path
-
-    ckpt_path = f"{path}.ckpt"
-    if os.path.exists(ckpt_path):
-        return _export_generator_pth_from_ckpt(ckpt_path, pth_path)
-    return None
-
-
-def _resolve_checkpoint(model=None, infer_train_realizations=None, infer_epochs=None):
-    infer_train_realizations = (
-        cfg.train_realizations if infer_train_realizations is None else infer_train_realizations
-    )
-    infer_epochs = cfg.infer_epochs if infer_epochs is None else infer_epochs
-
-    if model is not None:
-        base = str(model)
-        candidates = [base]
-        if not base.endswith((".pth", ".ckpt")):
-            candidates.append(f"{base}.pth")
-            candidates.append(f"{base}-e{infer_epochs}.pth")
-        for path in candidates:
-            resolved = _resolve_or_export_checkpoint(path)
-            if resolved is not None:
-                return resolved
-        raise FileNotFoundError(
-            "Model checkpoint not found (.pth/.ckpt). Tried: " + ", ".join(candidates)
-        )
-
-    if cfg.infer_checkpoint is not None:
-        checkpoint_path = cfg.infer_checkpoint
-    else:
-        auto_model = cfg.vec_gan_model_name(
-            infer_train_realizations,
-            cfg.patch_size,
-            cfg.padding,
-            cfg.vec_rotate,
-            cfg.N_p,
-        )
-        checkpoint_path = f"{auto_model}-e{infer_epochs}.pth"
-
-    resolved = _resolve_or_export_checkpoint(str(checkpoint_path))
-    if resolved is None:
-        raise FileNotFoundError(f"Model checkpoint not found (.pth/.ckpt): {checkpoint_path}")
-    return resolved
+    """Backward-compatible re-export for notebook utilities."""
+    return _infer_num_pools_impl(state_dict)
 
 
 def _load_model(checkpoint_path, device):
-    checkpoint_obj = torch.load(checkpoint_path, map_location="cpu")
-    state_dict = _extract_generator_state(checkpoint_obj)
-    num_pools = _infer_num_pools(state_dict)
-    # Infer channels from the first conv layer weight shape
-    inc_key = 'inc.double_conv.0.weight'
-    if inc_key in state_dict:
-        in_channels = state_dict[inc_key].shape[1]
-        base_channels = state_dict[inc_key].shape[0]
-    else:
-        in_channels = 3  # default for vector pipeline
-        base_channels = 16
-    n_classes = in_channels  # symmetric: in_channels == n_classes
-    model = nnmodel.UNet3D(
-        n_classes=n_classes, in_channels=in_channels,
-        trilinear=True, base_channels=base_channels, num_pools=num_pools,
-    )
-    model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
-    return model, num_pools
+    """Backward-compatible re-export for notebook utilities."""
+    return _load_model_impl(checkpoint_path, device)
 
 
 def verify_realization(
@@ -167,6 +35,7 @@ def verify_realization(
     coef_file=None,
     infer_train_realizations=None,
     infer_epochs=None,
+    force_rebuild=False,
     bispectrum=True,
     k1_bk=0.4,
     k2_bk=0.4
@@ -197,6 +66,23 @@ def verify_realization(
     dl = DDDF(cfg.Omega_m, threads)
     veck_main = dl.Veck(dl, N_p, boxsize, padding=0)
 
+    # ── Run unified inference chain (returns final_psi only) ──────────────
+    checkpoint_path = _resolve_checkpoint(
+        model=model,
+        infer_train_realizations=infer_train_realizations,
+        infer_epochs=infer_epochs,
+    )
+    final_psi = infer_final_psi_from_seed(
+        seed=realization,
+        force_rebuild=force_rebuild,
+        model=checkpoint_path,
+        infer_train_realizations=infer_train_realizations,
+        infer_epochs=infer_epochs,
+        k_cut=k_cut,
+        k_width=k_width,
+        coef_file=coef_file,
+    )
+
     # ── Load WN initial conditions ────────────────────────────────────────
     wn_info = dl.get_snapshot_wn(
         cfg.wn_psi1_path(realization, N_p),
@@ -217,41 +103,17 @@ def verify_realization(
     target_psi_div, target_psi = dl.compute_target_psi_wn(
         q_init, final_info['pos'], N_p, boxsize, veck_main)
 
-    # ── Baseline (returns 4-tuple including vector psi) ─────────────────
-    baseline_psi_div, baseline_psi, baseline_delta, target_delta = compute_baseline(
+    # ── Baseline fields for verification comparison ─────────────────────
+    _, _, baseline_delta, target_delta = compute_baseline(
         dl, init_delta, target_psi_div,
         q_init, final_delta,
         veck_main, N_p, boxsize, MAS,
         realization, data_dir, L,
         coef_file=coef_file,
-        overwrite=False,
+        overwrite=force_rebuild,
     )
 
-    # ── Load model and predict residual ───────────────────────────────────
-    checkpoint_path = _resolve_checkpoint(
-        model=model,
-        infer_train_realizations=infer_train_realizations,
-        infer_epochs=infer_epochs,
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loaded_model, num_pools = _load_model(checkpoint_path, device)
-    print(
-        f"GAN Loaded: {checkpoint_path} "
-        f"(pools={num_pools}, device={device})"
-    )
-
-    residual_pred = apply_model_to_field(
-        baseline_psi,
-        loaded_model,
-        cfg.infer_patch_size,
-        cfg.infer_padding,
-        cfg.infer_overlap,
-        device,
-        batch_size=cfg.infer_batch_size,
-    )
-    residual_pred = highpass_vector_field(residual_pred, k_cut, boxsize, width=k_width)
-
-    final_psi = baseline_psi + residual_pred
+    # ── Convert psi fields to density for verification plots/stats ────────
     delta_final = psi_to_delta(
         final_psi, dl, q_init, N_p, boxsize, MAS)
     delta_recovered = psi_to_delta(
@@ -280,7 +142,7 @@ def verify_realization(
     # ── Residual distribution ─────────────────────────────────────────────
     residual_values = delta_residual.ravel()
     residual_mean = float(np.mean(residual_values))
-    residual_std  = float(np.std(residual_values))
+    residual_std = float(np.std(residual_values))
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.hist(residual_values, bins=120, range=(-1.0, 1.0),

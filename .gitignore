@@ -5,3 +5,4 @@ __pycache__
 *.err
 *.out
 ./src/ic2residual.py
+*.codex

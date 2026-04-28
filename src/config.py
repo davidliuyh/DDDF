@@ -128,6 +128,11 @@ def target_delta_path(realization, data_dir=None, L=L, N_p=N_p, filter_dir=None)
     return f'{data_path}/{ddir}/target-deltaL{L}N{N_p}-{realization}.npz'
 
 
+def final_psi_path(realization, data_dir=None, L=L, N_p=N_p, filter_dir=None):
+    ddir = _resolve_data_dir(data_dir=data_dir, filter_dir=filter_dir)
+    return f'{data_path}/{ddir}/final-psiL{L}N{N_p}-{realization}.npz'
+
+
 def realization_tag(realizations):
     if isinstance(realizations, (list, tuple)):
         return '+'.join(str(r) for r in realizations)
